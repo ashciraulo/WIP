@@ -1,0 +1,23 @@
+[
+  {
+    "bcJobId": "J-10042",
+    "jobNumber": "10042",
+    "name": "Riverside Office Fit-Out",
+    "client": "Meridian Holdings",
+    "dueDate": "2026-09-18"
+  },
+  {
+    "bcJobId": "J-10057",
+    "jobNumber": "10057",
+    "name": "Harbourview Retail Refresh",
+    "client": "Coastal Retail Group",
+    "dueDate": "2026-09-05"
+  },
+  {
+    "bcJobId": "J-10061",
+    "jobNumber": "10061",
+    "name": "Northgate Warehouse Extension",
+    "client": "Pallmark Logistics",
+    "dueDate": "2026-10-02"
+  }
+]

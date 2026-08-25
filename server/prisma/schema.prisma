@@ -1,0 +1,147 @@
+// WIP Tracker data model.
+//
+// Uses SQLite for zero-config local dev. SQLite's Prisma connector doesn't
+// support native enums, so enum-shaped fields below are plain Strings —
+// the allowed values are enforced in the application layer (see
+// server/src/domain.ts) and documented alongside each field. Switching to
+// Postgres for a shared/production deployment (just the datasource
+// provider + DATABASE_URL) can reintroduce real `enum` blocks at that
+// point if desired; nothing else here is SQLite-specific.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id    String @id @default(cuid())
+  name  String
+  email String @unique
+  /// STAFF | MANAGER | ADMIN
+  role      String  @default("STAFF")
+  active    Boolean @default(true)
+  managerId String?
+  manager   User?   @relation("ManagerStaff", fields: [managerId], references: [id])
+  staff     User[]  @relation("ManagerStaff")
+  createdAt DateTime @default(now())
+
+  assignedTasks  Task[]              @relation("AssignedTasks")
+  dueDateChanges DueDateChangeLog[]
+  taskEvents     TaskEvent[]
+}
+
+model Job {
+  id         String    @id @default(cuid())
+  // External Business Central identifier (e.g. Job No.). Nullable so jobs can
+  // also be created manually before/without BC, but unique when present.
+  bcJobId    String?   @unique
+  jobNumber  String
+  name       String
+  client     String?
+  dueDate    DateTime?
+  /// ACTIVE | ON_HOLD | COMPLETE | CANCELLED
+  status     String    @default("ACTIVE")
+  importedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  tasks    Task[]
+  idleGaps IdleGap[]
+}
+
+model Task {
+  id       String @id @default(cuid())
+  jobId    String
+  job      Job    @relation(fields: [jobId], references: [id])
+  name     String
+  // Position of this task within the job's task list. Drives "current task",
+  // "next task" / handover logic, and idle-gap tracking between tasks.
+  sequence Int
+
+  assignedUserId String?
+  assignedUser   User?  @relation("AssignedTasks", fields: [assignedUserId], references: [id])
+  /// NOT_STARTED | IN_PROGRESS | COMPLETE | ON_HOLD
+  status            String @default("NOT_STARTED")
+  completionPercent Int    @default(0)
+
+  expectedCompletionDate         DateTime?
+  // Set once, the first time an expected date is entered. Kept alongside the
+  // (mutable) expectedCompletionDate so we can measure slippage over the
+  // life of the task, independent of the change-log below.
+  originalExpectedCompletionDate DateTime?
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  dueDateChanges DueDateChangeLog[]
+  events         TaskEvent[]
+  idleGapsFrom   IdleGap[]          @relation("IdleGapFrom")
+  idleGapsTo     IdleGap[]          @relation("IdleGapTo")
+
+  @@index([jobId, sequence])
+  @@index([assignedUserId, status])
+}
+
+// One row per time a user pushes out (or pulls in) a task's expected
+// completion date. This is the raw material for the "why do our dates keep
+// moving" analytics.
+model DueDateChangeLog {
+  id      String @id @default(cuid())
+  taskId  String
+  task    Task   @relation(fields: [taskId], references: [id])
+  userId  String
+  user    User   @relation(fields: [userId], references: [id])
+  oldDate DateTime?
+  newDate DateTime
+  /// MATERIAL_DELAY | STAFF_ABSENCE | REWORK | CLIENT_DELAY | SCOPE_CHANGE | WAITING_ON_THIRD_PARTY | OTHER
+  reason    String
+  note      String?
+  changedAt DateTime @default(now())
+
+  @@index([taskId])
+  @@index([reason])
+}
+
+// Lightweight audit trail. Powers "time in status" and general activity
+// history shown in the job modal, and is a fallback data source for
+// analytics beyond due-date changes.
+model TaskEvent {
+  id     String  @id @default(cuid())
+  taskId String
+  task   Task    @relation(fields: [taskId], references: [id])
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+  /// ASSIGNED | STATUS_CHANGED | PERCENT_UPDATED | DUE_DATE_CHANGED | STARTED | COMPLETED | HANDED_OFF
+  type      String
+  fromValue String?
+  toValue   String?
+  timestamp DateTime @default(now())
+
+  @@index([taskId])
+}
+
+// Captures a gap where a job sat with no task actively in progress —
+// typically between one task completing and the next one starting.
+// Opened when a task completes and the next task in sequence isn't already
+// underway; closed when that next task starts.
+model IdleGap {
+  id           String    @id @default(cuid())
+  jobId        String
+  job          Job       @relation(fields: [jobId], references: [id])
+  fromTaskId   String?
+  fromTask     Task?     @relation("IdleGapFrom", fields: [fromTaskId], references: [id])
+  toTaskId     String?
+  toTask       Task?     @relation("IdleGapTo", fields: [toTaskId], references: [id])
+  idleStart    DateTime
+  idleEnd      DateTime?
+  durationMins Int?
+  createdAt    DateTime  @default(now())
+
+  @@index([jobId])
+}
