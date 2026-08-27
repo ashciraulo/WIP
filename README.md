@@ -8,6 +8,11 @@ in much beyond what the job already requires them to know.
 The guiding constraint on every design decision here: **staff should spend their time doing the
 work, not reporting on it.** Updating status is a slider drag or a couple of clicks, never a form.
 
+> **Testing the workflow right now?** See [`demo/`](demo/) for a standalone, no-server prototype
+> people can run in a browser today — it's a design exploration ahead of the real backend below,
+> not the same data model, and the two should be reconciled deliberately rather than assumed to
+> already match.
+
 ## What's built
 
 **Data model** (`server/prisma/schema.prisma`)
