@@ -556,7 +556,17 @@
         status: "ACTIVE", stage: "Production", stageEnteredAt: daysAgo(4), coordinatorId: "u_mike", ownerId: "u_dave", onHold: false }, // still literally Dave's — Sipho sees it live via the delegation below, nothing here gets mutated
       { id: "j8", jobNumber: "WJ-1044", name: "Pressure Vessel Nozzle Repair", customer: "Delta Energy",
         priority: "High", requiredDeliveryDate: daysFromNow(55), internalTargetDate: daysFromNow(48), dueDate: daysFromNow(55),
-        status: "ACTIVE", stage: "Order Received", stageEnteredAt: daysAgo(1), coordinatorId: "u_mike", ownerId: "u_mike", onHold: false },
+        status: "ACTIVE", stage: "Order Received", stageEnteredAt: daysAgo(1), coordinatorId: "u_mike", ownerId: "u_mike", onHold: false,
+        // fresh off a BC import — nothing production-specific has been picked yet, so it's held out of the board until triaged
+        needsTriage: true, rejectedTaskRefs: [],
+        candidateTasks: [
+          { bcTaskRef: "WJ-1044#10", name: "Engineering Review", expectedCompletionDate: daysFromNow(10) },
+          { bcTaskRef: "WJ-1044#20", name: "Material Procurement", expectedCompletionDate: daysFromNow(18) },
+          { bcTaskRef: "WJ-1044#30", name: "Welding — Shop", expectedCompletionDate: daysFromNow(35) },
+          { bcTaskRef: "WJ-1044#40", name: "NDT Inspection", expectedCompletionDate: daysFromNow(42) },
+          { bcTaskRef: "WJ-1044#50", name: "Powder Coating", expectedCompletionDate: daysFromNow(47) }, // generic BC line — doesn't apply to this job, a good one to show getting rejected
+          { bcTaskRef: "WJ-1044#60", name: "Final Documentation Pack", expectedCompletionDate: daysFromNow(52) },
+        ] },
       { id: "j9", jobNumber: "WJ-1039", name: "Skid Frame Modification", customer: "Northline Industrial",
         priority: "Medium", requiredDeliveryDate: daysFromNow(38), internalTargetDate: daysFromNow(32), dueDate: daysFromNow(38),
         status: "ACTIVE", stage: "Engineering", stageEnteredAt: daysAgo(12), coordinatorId: "u_mike", ownerId: "u_mike",
@@ -736,6 +746,8 @@
       addTaskLineOpenFor: null, // jobId with its "+ Add task line" form expanded, or null
       delegationOpen: false,
       delegationDraft: null,
+      triageJobId: null, // job currently open in the triage modal, or null
+      triageSelected: [], // bcTaskRefs currently checked in that modal
     };
   }
   function reviveJobDates(j) {
@@ -744,6 +756,9 @@
     j.internalTargetDate = j.internalTargetDate ? new Date(j.internalTargetDate) : null;
     j.actualCompletionDate = j.actualCompletionDate ? new Date(j.actualCompletionDate) : null;
     j.stageEnteredAt = j.stageEnteredAt ? new Date(j.stageEnteredAt) : new Date();
+    j.needsTriage = !!j.needsTriage;
+    j.candidateTasks = (j.candidateTasks || []).map(c => ({ ...c, expectedCompletionDate: c.expectedCompletionDate ? new Date(c.expectedCompletionDate) : null }));
+    j.rejectedTaskRefs = j.rejectedTaskRefs || [];
     return j;
   }
   function revivePendingDates(p) { p.submittedAt = new Date(p.submittedAt); p.decidedAt = p.decidedAt ? new Date(p.decidedAt) : null; return p; }
@@ -1144,7 +1159,7 @@
     const mapping = {};
     Object.keys(IMPORT_FIELD_GUESSES).forEach(f => mapping[f] = guessColumnIndex(headers, f));
     state.importError = null;
-    state.importDraft = { headers, rows, mapping, seedTasks: false, result: null };
+    state.importDraft = { headers, rows, mapping, result: null };
     render();
   }
   function startImportFromText(text) {
@@ -1311,9 +1326,10 @@
   // line, with the job-level columns (customer, dates, value...) repeated on every
   // row for that job. So a real file has several rows per Job No., not one; we
   // upsert the job on every matching row (idempotent — later rows just refresh the
-  // same fields) and, if "seed task lines" is on, turn each row's Job Task columns
-  // into a task line, keyed by Job No. + Job Task No. so re-importing the same file
-  // never creates duplicates.
+  // same fields), and if Job Task columns are mapped, queue each row's task as a
+  // triage candidate rather than a real task line — see the triage section below —
+  // keyed by Job No. + Job Task No. so re-importing the same file never re-queues
+  // one already confirmed or rejected in a previous triage pass.
   function runImport() {
     const d = state.importDraft;
     if (!d) return;
@@ -1373,15 +1389,24 @@
         if (coordinatorName && !coordinator) warnings.push(`${jobNumber}: coordinator "${coordinatorName}" not found in Employees — left assigned to you for now.`);
       }
 
-      if (d.seedTasks) {
-        const taskName = get("jobTaskName");
-        const jobTaskNo = get("jobTaskNo");
-        if (taskName) {
-          const bcTaskRef = `${jobNumber}#${jobTaskNo || i}`;
-          if (!state.tasks.some(t => t.bcTaskRef === bcTaskRef)) {
-            addTaskLine(job.id, { name: taskName, priority: "Medium", assignType: "individual", assignedUserId: null, expectedCompletionDate: requiredDeliveryDate, bcTaskRef });
-            tasksAdded++;
-          }
+      // BC's task lines are generic — the same standard list shows up whether or not it
+      // actually applies to this job — so an import never creates real task lines
+      // directly. It queues them as candidates for a coordinator/production owner to
+      // triage (see Job Board), keyed by Job No. + Job Task No. so re-importing the same
+      // file never re-queues one already confirmed, and never resurrects one already
+      // rejected during a previous triage pass.
+      const taskName = get("jobTaskName");
+      const jobTaskNo = get("jobTaskNo");
+      if (taskName) {
+        const bcTaskRef = `${jobNumber}#${jobTaskNo || i}`;
+        const alreadyConfirmed = state.tasks.some(t => t.bcTaskRef === bcTaskRef);
+        const alreadyRejected = (job.rejectedTaskRefs || []).includes(bcTaskRef);
+        const alreadyQueued = (job.candidateTasks || []).some(c => c.bcTaskRef === bcTaskRef);
+        if (!alreadyConfirmed && !alreadyRejected && !alreadyQueued) {
+          job.candidateTasks = job.candidateTasks || [];
+          job.candidateTasks.push({ bcTaskRef, name: taskName, expectedCompletionDate: requiredDeliveryDate });
+          job.needsTriage = true;
+          tasksAdded++;
         }
       }
     });
@@ -1411,6 +1436,34 @@
     if (!t) return;
     state.tasks = state.tasks.filter(x => x.id !== taskId);
     tasksForJob(t.jobId).forEach((x, i) => { x.sequence = i + 1; }); // keep "Task N" contiguous
+  }
+
+  /* ---- Triage: winnowing BC's generic task list down to what applies to this job ---- */
+  function jobsNeedingTriage() { return state.jobs.filter(j => j.needsTriage && (j.candidateTasks || []).length); }
+  function jobsNeedingTriageFor(userId) { return jobsNeedingTriage().filter(j => isOrDelegatesFor(userId, j.coordinatorId) || isOrDelegatesFor(userId, j.ownerId)); }
+  function openTriage(jobId) {
+    const job = jobById(jobId);
+    if (!job) return;
+    state.triageJobId = jobId;
+    state.triageSelected = (job.candidateTasks || []).map(c => c.bcTaskRef); // default: everything selected, uncheck what doesn't apply
+    render();
+  }
+  function closeTriage() { state.triageJobId = null; state.triageSelected = []; }
+  // Selected candidates become real, unassigned task lines; everything left unchecked is
+  // remembered as rejected so a later re-import never queues it again.
+  function confirmTriage(jobId, selectedRefs) {
+    const job = jobById(jobId);
+    if (!job) return;
+    (job.candidateTasks || []).forEach(cand => {
+      if (selectedRefs.includes(cand.bcTaskRef)) {
+        addTaskLine(jobId, { name: cand.name, priority: "Medium", assignType: "individual", assignedUserId: null, expectedCompletionDate: cand.expectedCompletionDate, bcTaskRef: cand.bcTaskRef });
+      } else {
+        job.rejectedTaskRefs = job.rejectedTaskRefs || [];
+        job.rejectedTaskRefs.push(cand.bcTaskRef);
+      }
+    });
+    job.candidateTasks = [];
+    job.needsTriage = false;
   }
 
   // Job ownership: the person accountable for the job moving through every step,
@@ -1713,6 +1766,14 @@
   function coveringChip(name) { return name ? `<div class="vendor-tag" style="color:var(--warn);">🔁 Covering for ${name}</div>` : ""; }
 
   function render() {
+    // Every interaction inside an open modal (a slider drag, a field edit, clicking
+    // "Expected:", anything) runs through here, and renderModal() below fully replaces
+    // the modal's DOM — including .modal-body, which is independently scrollable. A
+    // fresh element defaults to scrollTop 0, which is what was reading as "the modal
+    // jumps to the top" on every click. Carrying the scroll position across the
+    // replacement fixes that for every interaction at once, not just one button.
+    const oldModalBody = document.querySelector(".modal-body");
+    const modalScroll = oldModalBody ? oldModalBody.scrollTop : null;
     renderRailNav();
     renderViewerSelect();
     renderRailFooter();
@@ -1726,6 +1787,10 @@
     else if (state.view === "employees") el.innerHTML = renderEmployees();
     else if (state.view === "guide") el.innerHTML = renderGuide();
     renderModal();
+    if (modalScroll != null) {
+      const newModalBody = document.querySelector(".modal-body");
+      if (newModalBody) newModalBody.scrollTop = modalScroll;
+    }
     wireSliders();
     wireBoardDragDrop();
     wireTaskLineForm();
@@ -1748,9 +1813,10 @@
       return s + rollup.reduce((s2, r) => s2 + r.overdueCount, 0) + overCapacity;
     }, 0);
     const myApprovals = effectivePendingApprovalsFor(state.currentUserId).length;
+    const myTriage = jobsNeedingTriageFor(state.currentUserId).length;
     const nav = document.getElementById("railNav");
     nav.innerHTML = NAV_ITEMS.filter(i => i.gate()).map(item => {
-      let alertCount = item.id === "manager" ? teamAlerts : item.id === "me" ? myApprovals : 0;
+      let alertCount = item.id === "manager" ? teamAlerts : item.id === "me" ? myApprovals : item.id === "board" ? myTriage : 0;
       const alert = alertCount > 0 ? `<span class="nav-alert">${alertCount}</span>` : "";
       return `<button data-nav="${item.id}" aria-current="${state.view === item.id ? "page" : "false"}"><span class="nav-pill"></span>${item.icon()}<span>${item.label}</span>${alert}</button>`;
     }).join("");
@@ -1850,6 +1916,15 @@
     </div>`;
   }
 
+  function renderTriageBanner(userId) {
+    const jobs = jobsNeedingTriageFor(userId);
+    if (!jobs.length) return "";
+    return `
+    <div class="panel" style="padding:11px 15px; margin-bottom:18px; background:var(--warn-soft); border-color:var(--warn-strong);">
+      <div style="font-size:12.5px; color:var(--warn); font-weight:600;">🧭 ${jobs.length} job${jobs.length === 1 ? "" : "s"} waiting on you to triage — task lines came in from BC's generic list and won't show on the Job Board until you pick what applies. <button class="btn-ghost-small" data-nav="board" style="margin-left:4px;">Review on Job Board →</button></div>
+    </div>`;
+  }
+
   function renderMe() {
     const me = userById(state.currentUserId);
     const d = getMyDashboard(me.id);
@@ -1870,6 +1945,7 @@
       </div>
 
       ${renderCoveringBanner(me.id)}
+      ${renderTriageBanner(me.id)}
       ${renderPendingApprovalsPanel(me.id)}
       ${renderOwnedJobsPanel(me.id)}
 
@@ -2159,6 +2235,7 @@
   function renderJobBoard() {
     const f = state.boardFilter;
     let jobs = state.jobs.filter(j => {
+      if (j.needsTriage) return false; // held out of every stage column until triaged — see the panel above the board
       if (f.search) {
         const s = f.search.toLowerCase();
         if (!(j.name.toLowerCase().includes(s) || j.jobNumber.toLowerCase().includes(s) || (j.customer || "").toLowerCase().includes(s))) return false;
@@ -2168,6 +2245,7 @@
       return true;
     });
     const stalled = jobs.filter(isStalled).length;
+    const triageQueue = jobsNeedingTriage();
 
     return `
       <div class="view-header">
@@ -2180,6 +2258,21 @@
           <button class="btn-primary" data-open-new-job="1">+ New Job</button>
         </div>
       </div>
+      ${triageQueue.length ? `
+      <div class="panel" style="margin-bottom:18px; border-color:var(--warn-strong); background:var(--warn-soft);">
+        <h2 style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">Needs triage <span class="badge warn">${triageQueue.length}</span></h2>
+        <p style="color:var(--ink-soft); font-size:12.5px; margin:0 0 12px;">Task lines came in from BC's generic list — pick what applies before these jobs show up on the board below.</p>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          ${triageQueue.map(j => `
+            <button class="card handover-row" data-open-triage="${j.id}">
+              <div>
+                <div class="job-title">${j.jobNumber} · ${j.name}${j.customer ? ` — ${j.customer}` : ""}</div>
+                <div class="job-meta">${j.candidateTasks.length} candidate task line${j.candidateTasks.length === 1 ? "" : "s"} to review</div>
+              </div>
+              <div class="handover-right"><span class="badge warn">Review →</span></div>
+            </button>`).join("")}
+        </div>
+      </div>` : ""}
       <div class="toolbar">
         <input type="text" id="boardSearch" placeholder="Search job, number or customer…" value="${escapeAttr(f.search)}">
         <select id="boardPriority">
@@ -2498,14 +2591,19 @@
         <h2>1. Bring in some real jobs</h2>
         <p style="color:var(--ink-soft);">Two ways to get a job in:</p>
         <ul style="margin:0 0 14px; padding-left:18px; color:var(--ink-soft);">
-          <li style="margin-bottom:6px;"><b>Import from BC</b> — upload the .xlsx "Job WIP Worksheet" export straight out of Excel (or paste CSV/copied cells instead). Column matches are pre-guessed against the real BC field names, including a job's own operational status, contract value and BC reference numbers. A real export has one row per job task line, so the same job number showing up several times is normal — it's grouped correctly, and there's an option to turn those job task rows straight into unassigned task lines. Jobs are matched to existing ones by job number and refreshed — nothing already in progress here gets rewound by a re-import, so it's safe to import the same file again later.</li>
+          <li style="margin-bottom:6px;"><b>Import from BC</b> — upload the .xlsx "Job WIP Worksheet" export straight out of Excel (or paste CSV/copied cells instead). Column matches are pre-guessed against the real BC field names, including a job's own operational status, contract value and BC reference numbers. A real export has one row per job task line, so the same job number showing up several times is normal — it's grouped correctly, and if the Job Task columns are mapped, those rows get queued for triage (see below) rather than turned into task lines directly. Jobs are matched to existing ones by job number and refreshed — nothing already in progress here gets rewound by a re-import, so it's safe to import the same file again later.</li>
           <li><b>+ New Job</b> — for the odd one that didn't come through BC.</li>
         </ul>
         <button class="btn-primary" data-goto-import="1">Go to Job Board to import →</button>
       </div>
 
       <div class="panel">
-        <h2>2. How a job actually moves through here</h2>
+        <h2>2. Triage what came in</h2>
+        <p style="color:var(--ink-soft); margin:0;">BC's task lines are generic — the same standard list shows up whether or not it actually applies to a given job. So a freshly-imported job doesn't land straight on the board: it sits in a <b>Needs triage</b> panel above it until the coordinator or production owner opens it and picks which candidate task lines actually apply. Confirm the ones that do (they become real task lines), and leave the rest unchecked — a rejected one is remembered, so it won't come back if the file is imported again. This is a one-time pass per job, not per re-import.</p>
+      </div>
+
+      <div class="panel">
+        <h2>3. How a job actually moves through here</h2>
         <p style="color:var(--ink-soft);">Nine stages, left to right on the Job Board. Drag a card to move it — nothing is locked to move forward-only, so drag a job backward if something needs rework (a failed inspection, say). Not every job needs every stage either — a quick repair can jump straight from Order Received to Production.</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Stage</th><th>Who's driving it</th><th>What happens</th></tr></thead>
@@ -2514,9 +2612,9 @@
       </div>
 
       <div class="panel">
-        <h2>3. Who looks at what</h2>
+        <h2>4. Who looks at what</h2>
         <ul style="margin:0; padding-left:18px; color:var(--ink-soft);">
-          <li style="margin-bottom:8px;"><b>Coordinator</b> (owns a job start to finish) — Job Board to move it through the early stages and manage holds; All Actions if you're also tracking non-production items.</li>
+          <li style="margin-bottom:8px;"><b>Coordinator</b> (owns a job start to finish) — Job Board to move it through the early stages, triage freshly-imported task lines, and manage holds; All Actions if you're also tracking non-production items.</li>
           <li style="margin-bottom:8px;"><b>Production team leader</b> (e.g. Welding Workshop, Robotics) — My Dashboard for your own items, Team for your crew's workload, and the job itself (open it from the Job Board or WIP Meeting) to add and assign task lines once it reaches Production.</li>
           <li style="margin-bottom:8px;"><b>Anyone doing task work</b> — My Dashboard is the whole job: your open items, drag the slider, done.</li>
           <li style="margin-bottom:8px;"><b>Manager</b> — WIP Meeting for the daily "what's the state of the floor" view, Analytics for trends (forecast, why dates keep moving, idle time), Team for workload across your reports.</li>
@@ -2590,6 +2688,7 @@
     if (state.importOpen) { root.innerHTML = renderImportModalHtml(); return; }
     if (state.newJobOpen) { root.innerHTML = renderNewJobModalHtml(); return; }
     if (state.delegationOpen) { root.innerHTML = renderDelegationModalHtml(); return; }
+    if (state.triageJobId) { root.innerHTML = renderTriageModalHtml(); return; }
     if (state.openJobId) { root.innerHTML = renderJobModalHtml(state.openJobId); return; }
     if (state.editingActionId) { root.innerHTML = renderActionModalHtml(); return; }
     root.innerHTML = "";
@@ -2943,12 +3042,9 @@
               </table></div>
               ${d.rows.length > 5 ? `<div class="desc-notes">…and ${d.rows.length - 5} more row${d.rows.length - 5 === 1 ? "" : "s"}. Every other mapped field above (customer no., contract value, BC status, etc.) is imported too — just left out of this preview to keep it readable.</div>` : ""}
               <div class="panel" style="padding:12px 14px; margin-top:12px;">
-                <label style="display:flex; align-items:flex-start; gap:8px; font-weight:600; cursor:pointer; margin-bottom:${d.seedTasks ? "10px" : "0"};">
-                  <input type="checkbox" id="importSeedTasks" ${d.seedTasks ? "checked" : ""} style="width:auto; margin-top:2px;">
-                  <span>Also create a task line from each row's job task info<br><span style="font-weight:400; color:var(--ink-faint); font-size:12px;">Unassigned — a team leader picks it up from here. Safe to re-run: matched by job + job task number, so the same row never creates a duplicate line.</span></span>
-                </label>
-                ${d.seedTasks ? `
-                <div class="field-row" style="flex-wrap:wrap; margin-top:10px; margin-bottom:0;">
+                <div style="font-weight:600; margin-bottom:2px;">Job task columns (optional)</div>
+                <p style="color:var(--ink-faint); font-size:12px; margin:0 0 10px;">BC's task lines are generic — the same standard list regardless of whether it actually applies to a given job — so mapping these doesn't create task lines directly. It queues them for triage: a coordinator or production owner picks what applies before the job appears on the Job Board. Safe to re-run: matched by job + job task number, so nothing gets queued twice and nothing already triaged comes back.</p>
+                <div class="field-row" style="flex-wrap:wrap; margin-bottom:0;">
                   ${IMPORT_TASK_FIELD_LABELS.map(f => `
                     <div class="field" style="min-width:200px;"><label>${f.label}</label>
                       <select data-import-map="${f.key}">
@@ -2956,7 +3052,7 @@
                         ${d.headers.map((h, i) => `<option value="${i}" ${d.mapping[f.key] === i ? "selected" : ""}>${escapeAttr(h || "Column " + (i + 1))}</option>`).join("")}
                       </select>
                     </div>`).join("")}
-                </div>` : ""}
+                </div>
               </div>
             </div>
             <div class="modal-foot">
@@ -2975,7 +3071,7 @@
             <div class="idle-stats">
               <div class="idle-stat"><div class="n">${r.created}</div><div class="l">New jobs</div></div>
               <div class="idle-stat"><div class="n">${r.updated}</div><div class="l">Updated</div></div>
-              ${r.tasksAdded ? `<div class="idle-stat"><div class="n">${r.tasksAdded}</div><div class="l">Task lines added</div></div>` : ""}
+              ${r.tasksAdded ? `<div class="idle-stat"><div class="n">${r.tasksAdded}</div><div class="l">Queued for triage</div></div>` : ""}
               ${r.skipped.length ? `<div class="idle-stat"><div class="n" style="color:var(--bad)">${r.skipped.length}</div><div class="l">Skipped</div></div>` : ""}
             </div>
             ${(r.skipped.length || r.warnings.length) ? `<div class="desc-notes">${[...r.skipped, ...r.warnings].map(s => escapeAttr(s)).join("<br>")}</div>` : ""}
@@ -3034,6 +3130,44 @@
             <button type="submit" class="btn-primary">Add job</button>
           </div>
         </form>
+      </div>`;
+  }
+
+  function renderTriageModalHtml() {
+    const job = jobById(state.triageJobId);
+    if (!job) return "";
+    const candidates = job.candidateTasks || [];
+    const selected = state.triageSelected;
+    return `
+      <div class="modal-backdrop" id="modalBackdrop">
+        <div class="modal-panel" style="max-width:560px;">
+          <div class="modal-head">
+            <div>
+              <div class="eyebrow">Triage · ${job.jobNumber}</div>
+              <h2>${job.name}</h2>
+              ${job.customer ? `<div class="client">${job.customer}</div>` : ""}
+            </div>
+            <button class="modal-close" id="triageCloseBtn">Close ✕</button>
+          </div>
+          <div class="modal-body">
+            <p style="color:var(--ink-soft); font-size:13px; margin:0;">These came in from BC's generic task list — pick what actually applies to this job. Unchecked ones won't come back on a re-import.</p>
+            <div class="toolbar" style="margin:10px 0 4px;">
+              <button class="btn-ghost-small" id="triageSelectAll">Select all</button>
+              <button class="btn-ghost-small" id="triageDeselectAll">Deselect all</button>
+              <span style="color:var(--ink-faint); font-size:12.5px; margin-left:auto;">${selected.length} of ${candidates.length} selected</span>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              ${candidates.map(c => `
+                <label class="card" style="display:flex; align-items:center; gap:10px; padding:10px 12px; cursor:pointer; ${selected.includes(c.bcTaskRef) ? "border-color:var(--accent);" : ""}">
+                  <input type="checkbox" data-triage-toggle="${escapeAttr(c.bcTaskRef)}" ${selected.includes(c.bcTaskRef) ? "checked" : ""} style="width:auto;">
+                  <span style="flex:1; font-weight:600; font-size:13px;">${c.name}</span>
+                  ${c.expectedCompletionDate ? `<span style="color:var(--ink-faint); font-size:12px;">Exp. ${fmtShort(c.expectedCompletionDate)}</span>` : ""}
+                </label>`).join("")}
+              ${candidates.length === 0 ? `<div class="empty-note">Nothing left to triage on this job.</div>` : ""}
+            </div>
+          </div>
+          <div class="modal-foot"><button class="btn-primary" id="triageConfirmBtn">Confirm — add ${selected.length} task line${selected.length === 1 ? "" : "s"}</button></div>
+        </div>
       </div>`;
   }
 
@@ -3298,6 +3432,18 @@
       render(); return;
     }
 
+    const openTriageBtn = e.target.closest("[data-open-triage]");
+    if (openTriageBtn) { openTriage(openTriageBtn.dataset.openTriage); return; }
+    if (e.target.id === "triageCloseBtn") { closeTriage(); render(); return; }
+    if (e.target.id === "triageSelectAll") { const job = jobById(state.triageJobId); state.triageSelected = (job.candidateTasks || []).map(c => c.bcTaskRef); render(); return; }
+    if (e.target.id === "triageDeselectAll") { state.triageSelected = []; render(); return; }
+    if (e.target.id === "triageConfirmBtn") {
+      const jobId = state.triageJobId;
+      confirmTriage(jobId, state.triageSelected);
+      closeTriage();
+      render(); return;
+    }
+
     const toggleAddTask = e.target.closest("[data-toggle-add-task]");
     if (toggleAddTask) { const id = toggleAddTask.dataset.toggleAddTask; state.addTaskLineOpenFor = state.addTaskLineOpenFor === id ? null : id; render(); return; }
     const addTaskBtn = e.target.closest("[data-add-task-line]");
@@ -3349,6 +3495,7 @@
       else if (state.importOpen) { state.importOpen = false; state.importDraft = null; render(); }
       else if (state.newJobOpen) { state.newJobOpen = false; state.newJobDraft = null; render(); }
       else if (state.delegationOpen) { state.delegationOpen = false; state.delegationDraft = null; render(); }
+      else if (state.triageJobId) { closeTriage(); render(); }
       else if (state.openJobId) closeJobModal();
       else if (state.editingActionId) closeActionModal();
       return;
@@ -3436,7 +3583,6 @@
     if (e.target.id === "regCategory") { state.register.category = e.target.value; render(); return; }
     if (e.target.id === "boardPriority") { state.boardFilter.priority = e.target.value; render(); return; }
     if (e.target.matches("select[data-import-map]")) { state.importDraft.mapping[e.target.dataset.importMap] = Number(e.target.value); render(); return; }
-    if (e.target.id === "importSeedTasks") { state.importDraft.seedTasks = e.target.checked; render(); return; }
     if (e.target.matches("select[data-job-field]")) { setJobField(e.target.dataset.jobId, e.target.dataset.jobField, e.target.value); render(); return; }
     if (e.target.matches("input[data-job-date]")) { setJobField(e.target.dataset.jobDate, e.target.dataset.jobField, e.target.value ? new Date(e.target.value + "T00:00:00") : null); render(); return; }
     if (e.target.matches("input[data-hold-toggle]")) {
@@ -3446,6 +3592,11 @@
       render(); return;
     }
     if (e.target.matches("select[data-hold-category]")) { setJobField(e.target.dataset.holdCategory, "holdCategory", e.target.value); render(); return; }
+    if (e.target.matches("input[data-triage-toggle]")) {
+      const ref = e.target.dataset.triageToggle;
+      state.triageSelected = e.target.checked ? [...state.triageSelected, ref] : state.triageSelected.filter(r => r !== ref);
+      render(); return;
+    }
     if (e.target.matches("input[data-hold-reason]")) { setJobField(e.target.dataset.holdReason, "holdReason", e.target.value); return; }
     if (e.target.id === "regStatus") { state.register.status = e.target.value; render(); return; }
     if (e.target.id === "regAssignee") { state.register.assignee = e.target.value; render(); return; }
@@ -3487,6 +3638,7 @@
       else if (state.importOpen) { state.importOpen = false; state.importDraft = null; render(); }
       else if (state.newJobOpen) { state.newJobOpen = false; state.newJobDraft = null; render(); }
       else if (state.delegationOpen) { state.delegationOpen = false; state.delegationDraft = null; render(); }
+      else if (state.triageJobId) { closeTriage(); render(); }
       else if (state.openJobId) closeJobModal();
       else if (state.editingActionId) closeActionModal();
     }
