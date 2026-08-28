@@ -84,6 +84,20 @@
     margin-left: auto; font-size: 10.5px; font-weight: 700; background: var(--accent); color: #fff;
     border-radius: 999px; padding: 1px 6px;
   }
+  .nav-group { display: flex; flex-direction: column; }
+  .nav-row { display: flex; align-items: center; gap: 2px; }
+  .nav-row button[data-nav] { flex: 1; min-width: 0; }
+  .nav-chevron {
+    flex: none; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;
+    border-radius: 6px; color: var(--rail-sub-ink);
+  }
+  .nav-chevron:hover { background: var(--rail-active-bg); color: #fff; }
+  .nav-children { display: flex; flex-direction: column; gap: 1px; padding: 2px 0 4px 30px; }
+  .nav-children .nav-child {
+    padding: 7px 10px; font-size: 12.5px; font-weight: 500; border-radius: 6px; color: var(--rail-sub-ink); text-align: left;
+  }
+  .nav-children .nav-child:hover { background: var(--rail-active-bg); color: #fff; }
+  .nav-children .nav-child[aria-current="page"] { background: var(--rail-active-bg); color: #fff; box-shadow: inset 2px 0 0 var(--accent); }
 
   .rail-spacer { flex: 1; }
   .rail-demo { display: flex; flex-direction: column; gap: 8px; padding: 0 2px; }
@@ -462,6 +476,9 @@
     .rail-nav { flex-direction: row; }
     .rail-spacer, .rail-footer { display: none; }
     .view { padding: 22px 16px 50px; }
+    /* Submenus don't fit the horizontal icon-row mobile nav — a submenu page (e.g.
+       Templates) is still reachable via a button on its parent page instead. */
+    .nav-chevron, .nav-children { display: none; }
   }
 </style>
 
@@ -800,7 +817,7 @@
 
     // Task-line templates: a known-good set for a common job type, applied at triage
     // to completely replace BC's generic candidate list rather than pick through it
-    // line by line. Editable (Admin-gated) via "⚙ Manage templates" on the Job Board.
+    // line by line. Editable (Admin-gated) on its own page — Job Board's submenu.
     const taskTemplates = [
       { id: uid("tpl"), name: "HVOF / Plasma Coating — Standard", tasks: [
         { id: uid("tt"), name: "Surface prep & masking" }, { id: uid("tt"), name: "Plasma spray coating" }, { id: uid("tt"), name: "Dimensional inspection" }, { id: uid("tt"), name: "Final Documentation Pack" },
@@ -831,7 +848,7 @@
       pendingUpdates: JSON.parse(JSON.stringify(INITIAL.pendingUpdates)).map(revivePendingDates),
       delegations: JSON.parse(JSON.stringify(INITIAL.delegations)).map(reviveDelegationDates),
       taskTemplates: JSON.parse(JSON.stringify(INITIAL.taskTemplates)),
-      templatesOpen: false, // "⚙ Manage templates" modal
+      navExpanded: [], // parent nav item ids whose submenu is manually toggled open
       currentUserId: "u_nomvula",
       view: "me",
       openJobId: null,
@@ -1706,8 +1723,8 @@
     (job.candidateTasks || []).forEach(c => job.rejectedTaskRefs.push(c.bcTaskRef));
     job.candidateTasks = tpl.tasks.map(t => ({ bcTaskRef: `template#${uid("c")}`, name: t.name, expectedCompletionDate: null }));
   }
-  // Template management — Admin-gated (see "⚙ Manage templates" on the triage modal),
-  // same reasoning as Employees/org chart: shared company-wide reference data, not
+  // Template management — Admin-gated (its own page, Job Board's submenu), same
+  // reasoning as Employees/org chart: shared company-wide reference data, not
   // something to leave wide open to edit mid-triage by whoever happens to be looking.
   function addTemplate() { state.taskTemplates.push({ id: uid("tpl"), name: "New template", tasks: [] }); }
   function deleteTemplate(id) { state.taskTemplates = state.taskTemplates.filter(t => t.id !== id); }
@@ -2008,10 +2025,14 @@
      RENDERING
      ============================================================ */
 
+  // `children` is optional — any item can grow a submenu later without touching the
+  // nav rendering/click-handling logic, which is written generically against it.
   const NAV_ITEMS = [
     { id: "guide", label: "Getting Started", icon: iconGuide, gate: () => true },
     { id: "me", label: "My Dashboard", icon: iconHome, gate: () => true },
-    { id: "board", label: "Job Board", icon: iconBoard, gate: () => true },
+    { id: "board", label: "Job Board", icon: iconBoard, gate: () => true, children: [
+      { id: "templates", label: "Task Line Templates", gate: () => true },
+    ] },
     { id: "manager", label: "Team", icon: iconUsers, gate: () => isManager(state.currentUserId) || leadsPool(state.currentUserId) || coveringForIds(state.currentUserId).length > 0 },
     { id: "wip", label: "WIP Meeting", icon: iconGrid, gate: () => true },
     { id: "register", label: "All Actions", icon: iconList, gate: () => true },
@@ -2066,6 +2087,7 @@
     try {
       if (state.view === "me") el.innerHTML = renderMe();
       else if (state.view === "board") el.innerHTML = renderJobBoard();
+      else if (state.view === "templates") el.innerHTML = renderTemplatesPage();
       else if (state.view === "manager") el.innerHTML = renderManager();
       else if (state.view === "wip") el.innerHTML = renderWip();
       else if (state.view === "register") el.innerHTML = renderRegister();
@@ -2113,6 +2135,12 @@
     el.innerHTML = `${dataLine} Saved to this browser only — not shared with other testers. In production this would sign in via SharePoint SSO with data shared company-wide.`;
   }
 
+  // Generic against NAV_ITEMS' optional `children` — a parent with a submenu shows a
+  // chevron (its own click target, a sibling of the nav button rather than nested
+  // inside it, so toggling never also fires a navigation); the submenu shows whenever
+  // it's been manually toggled open OR one of its children is the active view, so
+  // landing on a child page (e.g. a direct link) never leaves you looking at a
+  // collapsed group with no visible "you are here".
   function renderRailNav() {
     const leadershipIds = [...new Set([state.currentUserId, ...coveringForIds(state.currentUserId)])];
     const teamAlerts = leadershipIds.reduce((s, id) => {
@@ -2126,7 +2154,17 @@
     nav.innerHTML = NAV_ITEMS.filter(i => i.gate()).map(item => {
       let alertCount = item.id === "manager" ? teamAlerts : item.id === "me" ? myApprovals : item.id === "board" ? myTriage : 0;
       const alert = alertCount > 0 ? `<span class="nav-alert">${alertCount}</span>` : "";
-      return `<button data-nav="${item.id}" aria-current="${state.view === item.id ? "page" : "false"}"><span class="nav-pill"></span>${item.icon()}<span>${item.label}</span>${alert}</button>`;
+      const children = (item.children || []).filter(c => c.gate());
+      const childActive = children.some(c => c.id === state.view);
+      const expanded = childActive || state.navExpanded.includes(item.id);
+      return `
+        <div class="nav-group">
+          <div class="nav-row">
+            <button data-nav="${item.id}" aria-current="${state.view === item.id ? "page" : "false"}"><span class="nav-pill"></span>${item.icon()}<span>${item.label}</span>${alert}</button>
+            ${children.length ? `<button class="nav-chevron" data-nav-toggle="${item.id}" aria-expanded="${expanded}" title="${expanded ? "Collapse" : "Expand"} ${item.label}"><svg width="10" height="10" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate(${expanded ? "90deg" : "0deg"}); transition:transform .12s;"><path d="M7 4l6 6-6 6"/></svg></button>` : ""}
+          </div>
+          ${children.length && expanded ? `<div class="nav-children">${children.map(c => `<button class="nav-child" data-nav="${c.id}" aria-current="${state.view === c.id ? "page" : "false"}">${c.label}</button>`).join("")}</div>` : ""}
+        </div>`;
     }).join("");
   }
   function renderViewerSelect() {
@@ -2926,7 +2964,7 @@
       <div class="panel">
         <h2>2. Triage what came in</h2>
         <p style="color:var(--ink-soft); margin:0;">BC's task lines are generic — the same standard list shows up whether or not it actually applies to a given job. So a freshly-imported job doesn't land straight on the board: it sits in a <b>Needs triage</b> panel above it until the coordinator or production owner opens it and cleans up the candidate list. Remove what doesn't apply with ✕ (gone entirely, not just unticked — a removed one is remembered, so it won't come back if the file is imported again), hover the gap between candidates for a "+" to add one BC didn't send, and drag a candidate's ⠿ handle to reorder — the order here is the order the real task lines land in once confirmed. Whatever's left when you hit Confirm becomes the job's task lines. This is a one-time pass per job, not per re-import.</p>
-        <p style="color:var(--ink-soft); margin:10px 0 0;">If a job type has a known-good set of task lines, apply a <b>template</b> instead of picking through BC's list by hand — it completely replaces whatever's currently queued. Templates are company-wide and editable by an Admin ("⚙ Manage templates" on the triage screen).</p>
+        <p style="color:var(--ink-soft); margin:10px 0 0;">If a job type has a known-good set of task lines, apply a <b>template</b> instead of picking through BC's list by hand — it completely replaces whatever's currently queued. Templates are company-wide, live under Job Board → Task Line Templates in the sidebar, and are editable by an Admin.</p>
       </div>
 
       <div class="panel">
@@ -2955,7 +2993,7 @@
         <h2>Views at a glance</h2>
         <ul style="margin:0; padding-left:18px; color:var(--ink-soft);">
           <li style="margin-bottom:6px;"><b>My Dashboard</b> — your open work, and jobs about to hand over to you next.</li>
-          <li style="margin-bottom:6px;"><b>Job Board</b> — every job, every stage, drag-and-drop. The "where does everything stand" view. Open a job and expand "Job lifetime" for the path it's taken — time in each stage, plus any time logged on hold. Hover the gap above or below any task line for a "+" to insert one exactly there, or drag a line's ⠿ handle to reorder it — works at any stage, including right after triage, before the job's even reached Production.</li>
+          <li style="margin-bottom:6px;"><b>Job Board</b> — every job, every stage, drag-and-drop. The "where does everything stand" view. Open a job and expand "Job lifetime" for the path it's taken — time in each stage, plus any time logged on hold. Hover the gap above or below any task line for a "+" to insert one exactly there, or drag a line's ⠿ handle to reorder it — works at any stage, including right after triage, before the job's even reached Production. Has its own submenu — click the ▸ next to it for <b>Task Line Templates</b>.</li>
           <li style="margin-bottom:6px;"><b>Team</b> — visible if you manage people or lead a workshop pool.</li>
           <li style="margin-bottom:6px;"><b>WIP Meeting</b> — jobs actually in Production right now, current task and risk per job.</li>
           <li style="margin-bottom:6px;"><b>All Actions</b> — everything, one filterable table.</li>
@@ -3104,7 +3142,6 @@
     if (state.importOpen) { root.innerHTML = renderImportModalHtml(); return; }
     if (state.newJobOpen) { root.innerHTML = renderNewJobModalHtml(); return; }
     if (state.delegationOpen) { root.innerHTML = renderDelegationModalHtml(); return; }
-    if (state.templatesOpen) { root.innerHTML = renderTemplatesModalHtml(); return; }
     if (state.triageJobId) { root.innerHTML = renderTriageModalHtml(); return; }
     if (state.openJobId) { root.innerHTML = renderJobModalHtml(state.openJobId); return; }
     if (state.editingActionId) { root.innerHTML = renderActionModalHtml(); return; }
@@ -3680,50 +3717,50 @@
 
   // Admin-only edits; anyone else gets a read-only view of what a template contains
   // (they can still Apply one from the triage modal without opening this at all — this
-  // is only for defining/changing the sets themselves).
-  function renderTemplatesModalHtml() {
+  // page is only for defining/changing the sets themselves). A sub-page of Job Board
+  // in the nav rather than a modal — a list of templates, each with its own task list,
+  // gets cumbersome fast in a small modal footprint.
+  function renderTemplatesPage() {
     const admin = isAdmin(state.currentUserId);
     return `
-      <div class="modal-backdrop" id="modalBackdrop">
-        <div class="modal-panel" style="max-width:600px;">
-          <div class="modal-head">
-            <div>
-              <div class="eyebrow">Task line templates</div>
-              <h2>Manage templates</h2>
-              <div class="client">Applied at triage to completely replace whatever came in from BC.</div>
-            </div>
-            <button class="modal-close" id="templatesCloseBtn">Close ✕</button>
-          </div>
-          <div class="modal-body">
-            ${!admin ? `<p style="color:var(--ink-soft); font-size:12.5px; margin:0 0 4px; background:var(--neutral-soft); padding:9px 12px; border-radius:8px;">🔒 Read-only — editing templates needs Admin.</p>` : ""}
-            ${state.taskTemplates.map(tpl => `
-              <div class="panel" style="padding:12px 14px; margin-bottom:12px;">
-                <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
-                  ${admin
-                    ? `<input type="text" data-template-name="${tpl.id}" value="${escapeAttr(tpl.name)}" style="flex:1; font-weight:700; padding:6px 8px; border:1px solid var(--line); border-radius:6px; font-size:13.5px;">`
-                    : `<span style="flex:1; font-weight:700; font-size:13.5px;">${escapeAttr(tpl.name)}</span>`}
-                  ${admin ? `<button class="icon-btn" data-delete-template="${tpl.id}" title="Delete template">🗑</button>` : ""}
-                </div>
-                <div style="display:flex; flex-direction:column; gap:4px;">
-                  ${tpl.tasks.map(t => `
-                    <div class="card" ${admin ? `draggable="true" data-template-task-drag="${t.id}" data-template-id="${tpl.id}"` : ""} style="display:flex; align-items:center; gap:8px; padding:7px 10px; ${admin ? "cursor:grab;" : ""}">
-                      ${admin ? `<span class="tl-drag-handle" title="Drag to reorder">⠿</span>` : ""}
-                      <span style="flex:1; font-size:13px;">${escapeAttr(t.name)}</span>
-                      ${admin ? `<button class="icon-btn" data-remove-template-task="${t.id}" data-template-id="${tpl.id}" title="Remove">✕</button>` : ""}
-                    </div>`).join("")}
-                  ${tpl.tasks.length === 0 ? `<div class="empty-note">No task lines in this template yet.</div>` : ""}
-                </div>
-                ${admin ? `
-                <div class="row2" style="margin-top:8px;">
-                  <input type="text" data-new-template-task="${tpl.id}" placeholder="Add a task line…" style="flex:1;">
-                  <button class="btn-ghost-small" data-add-template-task="${tpl.id}">+ Add</button>
-                </div>` : ""}
-              </div>`).join("")}
-            ${state.taskTemplates.length === 0 ? `<div class="empty-note">No templates yet.</div>` : ""}
-            ${admin ? `<button class="btn-secondary" id="addTemplateBtn">+ New template</button>` : ""}
-          </div>
+      <div class="view-header">
+        <div>
+          <h1>Task Line Templates</h1>
+          <p class="lede">Pre-defined task-line sets, applied at triage to completely replace whatever came in from BC.</p>
         </div>
-      </div>`;
+        ${admin ? `<button class="btn-primary" id="addTemplateBtn">+ New template</button>` : ""}
+      </div>
+      ${!admin ? `
+      <div class="panel" style="padding:11px 15px; margin-bottom:16px; background:var(--neutral-soft); border-color:var(--line-strong);">
+        <span style="font-size:12.5px; color:var(--ink-soft);">🔒 Read-only — editing templates needs Admin. Applying one at triage is open to whoever triages a job.</span>
+      </div>` : ""}
+      <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px;">
+        ${state.taskTemplates.map(tpl => `
+          <div class="panel" style="padding:14px 16px;">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+              ${admin
+                ? `<input type="text" data-template-name="${tpl.id}" value="${escapeAttr(tpl.name)}" style="flex:1; font-weight:700; padding:7px 9px; border:1px solid var(--line); border-radius:6px; font-size:14px;">`
+                : `<span style="flex:1; font-weight:700; font-size:14px;">${escapeAttr(tpl.name)}</span>`}
+              ${admin ? `<button class="icon-btn" data-delete-template="${tpl.id}" title="Delete template">🗑</button>` : ""}
+            </div>
+            <div style="display:flex; flex-direction:column; gap:4px;">
+              ${tpl.tasks.map(t => `
+                <div class="card" ${admin ? `draggable="true" data-template-task-drag="${t.id}" data-template-id="${tpl.id}"` : ""} style="display:flex; align-items:center; gap:8px; padding:7px 10px; ${admin ? "cursor:grab;" : ""}">
+                  ${admin ? `<span class="tl-drag-handle" title="Drag to reorder">⠿</span>` : ""}
+                  <span style="flex:1; font-size:13px;">${escapeAttr(t.name)}</span>
+                  ${admin ? `<button class="icon-btn" data-remove-template-task="${t.id}" data-template-id="${tpl.id}" title="Remove">✕</button>` : ""}
+                </div>`).join("")}
+              ${tpl.tasks.length === 0 ? `<div class="empty-note">No task lines in this template yet.</div>` : ""}
+            </div>
+            ${admin ? `
+            <div class="row2" style="margin-top:8px;">
+              <input type="text" data-new-template-task="${tpl.id}" placeholder="Add a task line…" style="flex:1;">
+              <button class="btn-ghost-small" data-add-template-task="${tpl.id}">+ Add</button>
+            </div>` : ""}
+          </div>`).join("")}
+      </div>
+      ${state.taskTemplates.length === 0 ? `<div class="empty-note">No templates yet.</div>` : ""}
+    `;
   }
 
   function openDelegation() {
@@ -3838,10 +3875,10 @@
       });
     });
   }
-  // Reorder a template's own task list, in the Manage templates modal — same
-  // mechanic again, own dataTransfer type.
+  // Reorder a template's own task list, on the Templates page — same mechanic
+  // again, own dataTransfer type.
   function wireTemplateDragDrop() {
-    document.querySelectorAll(".modal-body [data-template-task-drag]").forEach(row => {
+    document.querySelectorAll("[data-template-task-drag]").forEach(row => {
       row.addEventListener("dragstart", e => {
         row.classList.add("dragging");
         e.dataTransfer.effectAllowed = "move";
@@ -3948,6 +3985,12 @@
   document.addEventListener("click", e => {
     const navBtn = e.target.closest("[data-nav]");
     if (navBtn) { state.view = navBtn.dataset.nav; render(); return; }
+    const navToggle = e.target.closest("[data-nav-toggle]");
+    if (navToggle) {
+      const id = navToggle.dataset.navToggle;
+      state.navExpanded = state.navExpanded.includes(id) ? state.navExpanded.filter(x => x !== id) : [...state.navExpanded, id];
+      render(); return;
+    }
 
     const openJob = e.target.closest("[data-open-job]");
     if (openJob) { state.openJobId = openJob.dataset.openJob; render(); return; }
@@ -4137,8 +4180,7 @@
       askConfirm(`Apply "${tpl.name}"? This replaces the ${count} task line${count === 1 ? "" : "s"} currently listed — can't be undone.`, () => applyTemplate(job, templateId));
       return;
     }
-    if (e.target.id === "manageTemplatesBtn") { state.templatesOpen = true; render(); return; }
-    if (e.target.id === "templatesCloseBtn") { state.templatesOpen = false; render(); return; }
+    if (e.target.id === "manageTemplatesBtn") { closeTriage(); state.view = "templates"; render(); return; }
     if (e.target.id === "addTemplateBtn") { addTemplate(); render(); return; }
     const deleteTemplateBtn = e.target.closest("[data-delete-template]");
     if (deleteTemplateBtn) {
@@ -4241,7 +4283,6 @@
       else if (state.importOpen) { state.importOpen = false; state.importDraft = null; render(); }
       else if (state.newJobOpen) { state.newJobOpen = false; state.newJobDraft = null; render(); }
       else if (state.delegationOpen) { state.delegationOpen = false; state.delegationDraft = null; render(); }
-      else if (state.templatesOpen) { state.templatesOpen = false; render(); }
       else if (state.triageJobId) { closeTriage(); render(); }
       else if (state.openJobId) closeJobModal();
       else if (state.editingActionId) closeActionModal();
@@ -4407,7 +4448,6 @@
       else if (state.importOpen) { state.importOpen = false; state.importDraft = null; render(); }
       else if (state.newJobOpen) { state.newJobOpen = false; state.newJobDraft = null; render(); }
       else if (state.delegationOpen) { state.delegationOpen = false; state.delegationDraft = null; render(); }
-      else if (state.templatesOpen) { state.templatesOpen = false; render(); }
       else if (state.triageJobId) { closeTriage(); render(); }
       else if (state.openJobId) closeJobModal();
       else if (state.editingActionId) closeActionModal();
