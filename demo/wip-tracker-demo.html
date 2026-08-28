@@ -798,7 +798,22 @@
         note: "Dave on leave — Sipho covering Welding Workshop.", createdAt: daysAgo(2) },
     ];
 
-    return { users, jobs, tasks, dueDateChanges, idleGaps, actions, robotEquipment, pendingUpdates, delegations };
+    // Task-line templates: a known-good set for a common job type, applied at triage
+    // to completely replace BC's generic candidate list rather than pick through it
+    // line by line. Editable (Admin-gated) via "⚙ Manage templates" on the Job Board.
+    const taskTemplates = [
+      { id: uid("tpl"), name: "HVOF / Plasma Coating — Standard", tasks: [
+        { id: uid("tt"), name: "Surface prep & masking" }, { id: uid("tt"), name: "Plasma spray coating" }, { id: uid("tt"), name: "Dimensional inspection" }, { id: uid("tt"), name: "Final Documentation Pack" },
+      ] },
+      { id: uid("tpl"), name: "Structural Fabrication — Standard", tasks: [
+        { id: uid("tt"), name: "Cutting & fit-up" }, { id: uid("tt"), name: "Welding — Shop" }, { id: uid("tt"), name: "Dimensional inspection" }, { id: uid("tt"), name: "Final Documentation Pack" },
+      ] },
+      { id: uid("tpl"), name: "Weld Repair — Standard", tasks: [
+        { id: uid("tt"), name: "Defect mapping" }, { id: uid("tt"), name: "Weld repair" }, { id: uid("tt"), name: "NDT Inspection" }, { id: uid("tt"), name: "Final Documentation Pack" },
+      ] },
+    ];
+
+    return { users, jobs, tasks, dueDateChanges, idleGaps, actions, robotEquipment, pendingUpdates, delegations, taskTemplates };
   }
 
   const INITIAL = seedData();
@@ -815,6 +830,8 @@
       robotEquipment: JSON.parse(JSON.stringify(INITIAL.robotEquipment)),
       pendingUpdates: JSON.parse(JSON.stringify(INITIAL.pendingUpdates)).map(revivePendingDates),
       delegations: JSON.parse(JSON.stringify(INITIAL.delegations)).map(reviveDelegationDates),
+      taskTemplates: JSON.parse(JSON.stringify(INITIAL.taskTemplates)),
+      templatesOpen: false, // "⚙ Manage templates" modal
       currentUserId: "u_nomvula",
       view: "me",
       openJobId: null,
@@ -840,7 +857,6 @@
       delegationOpen: false,
       delegationDraft: null,
       triageJobId: null, // job currently open in the triage modal, or null
-      triageSelected: [], // bcTaskRefs currently checked in that modal
       triageAddOpenAt: null, // index into candidateTasks the open "add a candidate" form inserts after, or null when closed
       boardSelectMode: false, // Job Board bulk-select mode (Admin only) — off by default so nobody sees checkboxes by accident
       boardSelection: [], // job ids currently checked while boardSelectMode is on
@@ -888,7 +904,7 @@
      fresh so a reload never reopens a stale form.
      ============================================================ */
   const STORAGE_KEY = "wip_tracker_state_v1";
-  const PERSISTED_KEYS = ["users", "jobs", "tasks", "dueDateChanges", "idleGaps", "actions", "robotEquipment", "pendingUpdates", "delegations", "currentUserId", "dataSource", "importedAt"];
+  const PERSISTED_KEYS = ["users", "jobs", "tasks", "dueDateChanges", "idleGaps", "actions", "robotEquipment", "pendingUpdates", "delegations", "taskTemplates", "currentUserId", "dataSource", "importedAt"];
   function saveState() {
     try {
       const snapshot = {};
@@ -925,6 +941,7 @@
       base.pendingUpdates = base.pendingUpdates.filter(p => validTaskIds.has(p.taskId));
       if (saved.actions) base.actions = saved.actions;
       if (saved.robotEquipment) base.robotEquipment = saved.robotEquipment;
+      if (saved.taskTemplates) base.taskTemplates = saved.taskTemplates;
       if (saved.currentUserId && base.users.some(u => u.id === saved.currentUserId)) base.currentUserId = saved.currentUserId;
       base.dataSource = saved.dataSource || "demo";
       base.importedAt = saved.importedAt ? new Date(saved.importedAt) : null;
@@ -1631,40 +1648,41 @@
     const job = jobById(jobId);
     if (!job) return;
     state.triageJobId = jobId;
-    state.triageSelected = (job.candidateTasks || []).map(c => c.bcTaskRef); // default: everything selected, uncheck what doesn't apply
     render();
   }
-  function closeTriage() { state.triageJobId = null; state.triageSelected = []; state.triageAddOpenAt = null; }
-  // Selected candidates become real, unassigned task lines, in candidateTasks array
-  // order — so reordering the triage list here is what controls the final task-line
-  // order once confirmed. Everything left unchecked is remembered as rejected so a
-  // later re-import never queues it again (harmless no-op for a custom-added one,
-  // since its synthetic ref can never match anything BC sends).
-  function confirmTriage(jobId, selectedRefs) {
+  function closeTriage() { state.triageJobId = null; state.triageAddOpenAt = null; }
+  // Every remaining candidate becomes a real, unassigned task line, in candidateTasks
+  // array order — reordering the triage list is what controls the final task-line
+  // order. There's no separate "selected" set any more: removing a candidate (the X)
+  // takes it out of the list entirely rather than leaving it visible-but-unchecked, so
+  // whatever's still here when you confirm is, by definition, what you want.
+  function confirmTriage(jobId) {
     const job = jobById(jobId);
     if (!job) return;
     (job.candidateTasks || []).forEach(cand => {
-      if (selectedRefs.includes(cand.bcTaskRef)) {
-        addTaskLine(jobId, { name: cand.name, priority: "Medium", assignType: "individual", assignedUserId: null, expectedCompletionDate: cand.expectedCompletionDate, bcTaskRef: cand.bcTaskRef });
-      } else {
-        job.rejectedTaskRefs = job.rejectedTaskRefs || [];
-        job.rejectedTaskRefs.push(cand.bcTaskRef);
-      }
+      addTaskLine(jobId, { name: cand.name, priority: "Medium", assignType: "individual", assignedUserId: null, expectedCompletionDate: cand.expectedCompletionDate, bcTaskRef: cand.bcTaskRef });
     });
     job.candidateTasks = [];
     job.needsTriage = false;
   }
+  // Removed rather than unchecked — reordering the ones you actually want shouldn't
+  // mean dragging them around ones you don't. Remembered as rejected either way (a
+  // no-op for a custom/template-sourced ref, whose synthetic id can never match
+  // anything a future BC import sends) so a re-import never brings a BC one back.
+  function removeTriageCandidate(job, bcTaskRef) {
+    if (!job) return;
+    job.candidateTasks = (job.candidateTasks || []).filter(c => c.bcTaskRef !== bcTaskRef);
+    job.rejectedTaskRefs = job.rejectedTaskRefs || [];
+    job.rejectedTaskRefs.push(bcTaskRef);
+  }
   // A candidate the coordinator adds by hand rather than one BC sent — same "requires
   // adding and re-organising task lines" ask as the job-board list, just one stage
-  // earlier, before anything's a real task line yet. Auto-selected, same as every BC
-  // candidate defaults to selected.
+  // earlier, before anything's a real task line yet.
   function insertTriageCandidate(job, afterIdx, name, expectedCompletionDate) {
     if (!job || !name) return;
     const list = job.candidateTasks || (job.candidateTasks = []);
-    const ref = `custom#${uid("c")}`;
     const insertPos = afterIdx == null ? list.length : Math.max(0, Math.min(afterIdx, list.length));
-    list.splice(insertPos, 0, { bcTaskRef: ref, name, expectedCompletionDate: expectedCompletionDate || null });
-    state.triageSelected.push(ref);
+    list.splice(insertPos, 0, { bcTaskRef: `custom#${uid("c")}`, name, expectedCompletionDate: expectedCompletionDate || null });
   }
   function reorderTriageCandidate(job, draggedRef, targetRef) {
     if (!job || draggedRef === targetRef) return;
@@ -1675,6 +1693,43 @@
     const targetIdx = list.findIndex(c => c.bcTaskRef === targetRef);
     if (targetIdx === -1) { list.splice(draggedIdx, 0, dragged); return; }
     list.splice(targetIdx, 0, dragged);
+  }
+  // Templates completely replace whatever's currently queued (whether from BC, typed
+  // in by hand, or a previously-applied template) rather than merge with it — the ask
+  // was specifically to swap in a known-good set, not to add to an untrusted one.
+  // Discarded candidates are remembered as rejected the same as an explicit X, so a
+  // BC one doesn't come back on the next import just because a template replaced it.
+  function applyTemplate(job, templateId) {
+    const tpl = state.taskTemplates.find(t => t.id === templateId);
+    if (!job || !tpl) return;
+    job.rejectedTaskRefs = job.rejectedTaskRefs || [];
+    (job.candidateTasks || []).forEach(c => job.rejectedTaskRefs.push(c.bcTaskRef));
+    job.candidateTasks = tpl.tasks.map(t => ({ bcTaskRef: `template#${uid("c")}`, name: t.name, expectedCompletionDate: null }));
+  }
+  // Template management — Admin-gated (see "⚙ Manage templates" on the triage modal),
+  // same reasoning as Employees/org chart: shared company-wide reference data, not
+  // something to leave wide open to edit mid-triage by whoever happens to be looking.
+  function addTemplate() { state.taskTemplates.push({ id: uid("tpl"), name: "New template", tasks: [] }); }
+  function deleteTemplate(id) { state.taskTemplates = state.taskTemplates.filter(t => t.id !== id); }
+  function addTemplateTask(templateId, name) {
+    const tpl = state.taskTemplates.find(t => t.id === templateId);
+    if (!tpl || !name) return;
+    tpl.tasks.push({ id: uid("tt"), name });
+  }
+  function removeTemplateTask(templateId, taskId) {
+    const tpl = state.taskTemplates.find(t => t.id === templateId);
+    if (!tpl) return;
+    tpl.tasks = tpl.tasks.filter(t => t.id !== taskId);
+  }
+  function reorderTemplateTask(templateId, draggedId, targetId) {
+    const tpl = state.taskTemplates.find(t => t.id === templateId);
+    if (!tpl || draggedId === targetId) return;
+    const draggedIdx = tpl.tasks.findIndex(t => t.id === draggedId);
+    if (draggedIdx === -1) return;
+    const [dragged] = tpl.tasks.splice(draggedIdx, 1);
+    const targetIdx = tpl.tasks.findIndex(t => t.id === targetId);
+    if (targetIdx === -1) { tpl.tasks.splice(draggedIdx, 0, dragged); return; }
+    tpl.tasks.splice(targetIdx, 0, dragged);
   }
 
   // Job ownership: the person accountable for the job moving through every step,
@@ -2044,6 +2099,7 @@
     try { wireBoardDragDrop(); } catch (err) { console.error("wireBoardDragDrop failed:", err); }
     try { wireTaskLineDragDrop(); } catch (err) { console.error("wireTaskLineDragDrop failed:", err); }
     try { wireTriageDragDrop(); } catch (err) { console.error("wireTriageDragDrop failed:", err); }
+    try { wireTemplateDragDrop(); } catch (err) { console.error("wireTemplateDragDrop failed:", err); }
     try { wireOrgChartDragDrop(); } catch (err) { console.error("wireOrgChartDragDrop failed:", err); }
     try { wireTaskLineForm(); } catch (err) { console.error("wireTaskLineForm failed:", err); }
     saveState();
@@ -2869,7 +2925,8 @@
 
       <div class="panel">
         <h2>2. Triage what came in</h2>
-        <p style="color:var(--ink-soft); margin:0;">BC's task lines are generic — the same standard list shows up whether or not it actually applies to a given job. So a freshly-imported job doesn't land straight on the board: it sits in a <b>Needs triage</b> panel above it until the coordinator or production owner opens it and picks which candidate task lines actually apply. Confirm the ones that do (they become real task lines), and leave the rest unchecked — a rejected one is remembered, so it won't come back if the file is imported again. This is a one-time pass per job, not per re-import. BC's list is rarely the whole picture either — hover the gap between candidates (or before the first / after the last) for a "+" to add one BC didn't send, and drag a candidate's ⠿ handle to reorder the list; the order here is the order the real task lines land in once confirmed.</p>
+        <p style="color:var(--ink-soft); margin:0;">BC's task lines are generic — the same standard list shows up whether or not it actually applies to a given job. So a freshly-imported job doesn't land straight on the board: it sits in a <b>Needs triage</b> panel above it until the coordinator or production owner opens it and cleans up the candidate list. Remove what doesn't apply with ✕ (gone entirely, not just unticked — a removed one is remembered, so it won't come back if the file is imported again), hover the gap between candidates for a "+" to add one BC didn't send, and drag a candidate's ⠿ handle to reorder — the order here is the order the real task lines land in once confirmed. Whatever's left when you hit Confirm becomes the job's task lines. This is a one-time pass per job, not per re-import.</p>
+        <p style="color:var(--ink-soft); margin:10px 0 0;">If a job type has a known-good set of task lines, apply a <b>template</b> instead of picking through BC's list by hand — it completely replaces whatever's currently queued. Templates are company-wide and editable by an Admin ("⚙ Manage templates" on the triage screen).</p>
       </div>
 
       <div class="panel">
@@ -3047,6 +3104,7 @@
     if (state.importOpen) { root.innerHTML = renderImportModalHtml(); return; }
     if (state.newJobOpen) { root.innerHTML = renderNewJobModalHtml(); return; }
     if (state.delegationOpen) { root.innerHTML = renderDelegationModalHtml(); return; }
+    if (state.templatesOpen) { root.innerHTML = renderTemplatesModalHtml(); return; }
     if (state.triageJobId) { root.innerHTML = renderTriageModalHtml(); return; }
     if (state.openJobId) { root.innerHTML = renderJobModalHtml(state.openJobId); return; }
     if (state.editingActionId) { root.innerHTML = renderActionModalHtml(); return; }
@@ -3576,7 +3634,7 @@
     const job = jobById(state.triageJobId);
     if (!job) return "";
     const candidates = job.candidateTasks || [];
-    const selected = state.triageSelected;
+    const admin = isAdmin(state.currentUserId);
     return `
       <div class="modal-backdrop" id="modalBackdrop">
         <div class="modal-panel" style="max-width:560px;">
@@ -3589,25 +3647,81 @@
             <button class="modal-close" id="triageCloseBtn">Close ✕</button>
           </div>
           <div class="modal-body">
-            <p style="color:var(--ink-soft); font-size:13px; margin:0;">These came in from BC's generic task list — pick what actually applies to this job, add any that didn't, and drag the ⠿ handle to reorder. Unchecked ones won't come back on a re-import.</p>
+            <p style="color:var(--ink-soft); font-size:13px; margin:0;">These came in from BC's generic task list — remove what doesn't apply with ✕, add any that didn't come in, and drag the ⠿ handle to reorder. Removed ones won't come back on a re-import.</p>
+            ${state.taskTemplates.length ? `
             <div class="toolbar" style="margin:10px 0 4px;">
-              <button class="btn-ghost-small" id="triageSelectAll">Select all</button>
-              <button class="btn-ghost-small" id="triageDeselectAll">Deselect all</button>
-              <span style="color:var(--ink-faint); font-size:12.5px; margin-left:auto;">${selected.length} of ${candidates.length} selected</span>
-            </div>
+              <select id="triageTemplateSelect" style="flex:1; min-width:160px;">
+                <option value="">Apply a template… (replaces the list below)</option>
+                ${state.taskTemplates.map(t => `<option value="${t.id}">${escapeAttr(t.name)} (${t.tasks.length})</option>`).join("")}
+              </select>
+              <button class="btn-secondary" id="triageApplyTemplateBtn">Apply</button>
+              ${admin ? `<button class="btn-ghost-small" id="manageTemplatesBtn" style="margin-left:auto;">⚙ Manage templates</button>` : ""}
+            </div>` : admin ? `
+            <div class="toolbar" style="margin:10px 0 4px;">
+              <button class="btn-ghost-small" id="manageTemplatesBtn">⚙ Manage templates</button>
+            </div>` : ""}
+            <p style="color:var(--ink-faint); font-size:11.5px; margin:0 0 10px;">${candidates.length} task line${candidates.length === 1 ? "" : "s"} will be added.</p>
             <div style="display:flex; flex-direction:column; gap:0;">
               ${candidates.map((c, i) => `
                 ${renderTriageDivider(i, false)}
-                <label class="card" draggable="true" data-triage-drag="${escapeAttr(c.bcTaskRef)}" style="display:flex; align-items:center; gap:10px; padding:10px 12px; margin:3px 0; cursor:grab; ${selected.includes(c.bcTaskRef) ? "border-color:var(--accent);" : ""}">
+                <div class="card" draggable="true" data-triage-drag="${escapeAttr(c.bcTaskRef)}" style="display:flex; align-items:center; gap:10px; padding:10px 12px; margin:3px 0; cursor:grab;">
                   <span class="tl-drag-handle" title="Drag to reorder">⠿</span>
-                  <input type="checkbox" data-triage-toggle="${escapeAttr(c.bcTaskRef)}" ${selected.includes(c.bcTaskRef) ? "checked" : ""} style="width:auto;">
                   <span style="flex:1; font-weight:600; font-size:13px;">${c.name}</span>
                   ${c.expectedCompletionDate ? `<span style="color:var(--ink-faint); font-size:12px;">Exp. ${fmtShort(c.expectedCompletionDate)}</span>` : ""}
-                </label>`).join("")}
+                  <button class="icon-btn" data-remove-triage-candidate="${escapeAttr(c.bcTaskRef)}" title="Remove — won't come back on a re-import">✕</button>
+                </div>`).join("")}
               ${renderTriageDivider(candidates.length, true)}
             </div>
           </div>
-          <div class="modal-foot"><button class="btn-primary" id="triageConfirmBtn">Confirm — add ${selected.length} task line${selected.length === 1 ? "" : "s"}</button></div>
+          <div class="modal-foot"><button class="btn-primary" id="triageConfirmBtn" ${candidates.length ? "" : "disabled"}>Confirm — add ${candidates.length} task line${candidates.length === 1 ? "" : "s"}</button></div>
+        </div>
+      </div>`;
+  }
+
+  // Admin-only edits; anyone else gets a read-only view of what a template contains
+  // (they can still Apply one from the triage modal without opening this at all — this
+  // is only for defining/changing the sets themselves).
+  function renderTemplatesModalHtml() {
+    const admin = isAdmin(state.currentUserId);
+    return `
+      <div class="modal-backdrop" id="modalBackdrop">
+        <div class="modal-panel" style="max-width:600px;">
+          <div class="modal-head">
+            <div>
+              <div class="eyebrow">Task line templates</div>
+              <h2>Manage templates</h2>
+              <div class="client">Applied at triage to completely replace whatever came in from BC.</div>
+            </div>
+            <button class="modal-close" id="templatesCloseBtn">Close ✕</button>
+          </div>
+          <div class="modal-body">
+            ${!admin ? `<p style="color:var(--ink-soft); font-size:12.5px; margin:0 0 4px; background:var(--neutral-soft); padding:9px 12px; border-radius:8px;">🔒 Read-only — editing templates needs Admin.</p>` : ""}
+            ${state.taskTemplates.map(tpl => `
+              <div class="panel" style="padding:12px 14px; margin-bottom:12px;">
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+                  ${admin
+                    ? `<input type="text" data-template-name="${tpl.id}" value="${escapeAttr(tpl.name)}" style="flex:1; font-weight:700; padding:6px 8px; border:1px solid var(--line); border-radius:6px; font-size:13.5px;">`
+                    : `<span style="flex:1; font-weight:700; font-size:13.5px;">${escapeAttr(tpl.name)}</span>`}
+                  ${admin ? `<button class="icon-btn" data-delete-template="${tpl.id}" title="Delete template">🗑</button>` : ""}
+                </div>
+                <div style="display:flex; flex-direction:column; gap:4px;">
+                  ${tpl.tasks.map(t => `
+                    <div class="card" ${admin ? `draggable="true" data-template-task-drag="${t.id}" data-template-id="${tpl.id}"` : ""} style="display:flex; align-items:center; gap:8px; padding:7px 10px; ${admin ? "cursor:grab;" : ""}">
+                      ${admin ? `<span class="tl-drag-handle" title="Drag to reorder">⠿</span>` : ""}
+                      <span style="flex:1; font-size:13px;">${escapeAttr(t.name)}</span>
+                      ${admin ? `<button class="icon-btn" data-remove-template-task="${t.id}" data-template-id="${tpl.id}" title="Remove">✕</button>` : ""}
+                    </div>`).join("")}
+                  ${tpl.tasks.length === 0 ? `<div class="empty-note">No task lines in this template yet.</div>` : ""}
+                </div>
+                ${admin ? `
+                <div class="row2" style="margin-top:8px;">
+                  <input type="text" data-new-template-task="${tpl.id}" placeholder="Add a task line…" style="flex:1;">
+                  <button class="btn-ghost-small" data-add-template-task="${tpl.id}">+ Add</button>
+                </div>` : ""}
+              </div>`).join("")}
+            ${state.taskTemplates.length === 0 ? `<div class="empty-note">No templates yet.</div>` : ""}
+            ${admin ? `<button class="btn-secondary" id="addTemplateBtn">+ New template</button>` : ""}
+          </div>
         </div>
       </div>`;
   }
@@ -3721,6 +3835,26 @@
         const draggedRef = e.dataTransfer.getData("application/x-triage-candidate");
         const job = jobById(state.triageJobId);
         if (draggedRef && job) { reorderTriageCandidate(job, draggedRef, row.dataset.triageDrag); render(); }
+      });
+    });
+  }
+  // Reorder a template's own task list, in the Manage templates modal — same
+  // mechanic again, own dataTransfer type.
+  function wireTemplateDragDrop() {
+    document.querySelectorAll(".modal-body [data-template-task-drag]").forEach(row => {
+      row.addEventListener("dragstart", e => {
+        row.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("application/x-template-task", row.dataset.templateTaskDrag);
+      });
+      row.addEventListener("dragend", () => row.classList.remove("dragging"));
+      row.addEventListener("dragover", e => { if (e.dataTransfer.types.includes("application/x-template-task")) { e.preventDefault(); row.classList.add("drag-over-line"); } });
+      row.addEventListener("dragleave", () => row.classList.remove("drag-over-line"));
+      row.addEventListener("drop", e => {
+        e.preventDefault();
+        row.classList.remove("drag-over-line");
+        const draggedId = e.dataTransfer.getData("application/x-template-task");
+        if (draggedId) { reorderTemplateTask(row.dataset.templateId, draggedId, row.dataset.templateTaskDrag); render(); }
       });
     });
   }
@@ -3982,12 +4116,49 @@
     const openTriageBtn = e.target.closest("[data-open-triage]");
     if (openTriageBtn) { openTriage(openTriageBtn.dataset.openTriage); return; }
     if (e.target.id === "triageCloseBtn") { closeTriage(); render(); return; }
-    if (e.target.id === "triageSelectAll") { const job = jobById(state.triageJobId); state.triageSelected = (job.candidateTasks || []).map(c => c.bcTaskRef); render(); return; }
-    if (e.target.id === "triageDeselectAll") { state.triageSelected = []; render(); return; }
     if (e.target.id === "triageConfirmBtn") {
       const jobId = state.triageJobId;
-      confirmTriage(jobId, state.triageSelected);
+      confirmTriage(jobId);
       closeTriage();
+      render(); return;
+    }
+    const removeTriageBtn = e.target.closest("[data-remove-triage-candidate]");
+    if (removeTriageBtn) {
+      const job = jobById(state.triageJobId);
+      removeTriageCandidate(job, removeTriageBtn.dataset.removeTriageCandidate);
+      render(); return;
+    }
+    if (e.target.id === "triageApplyTemplateBtn") {
+      const templateId = document.getElementById("triageTemplateSelect").value;
+      if (!templateId) return;
+      const job = jobById(state.triageJobId);
+      const tpl = state.taskTemplates.find(t => t.id === templateId);
+      const count = (job.candidateTasks || []).length;
+      askConfirm(`Apply "${tpl.name}"? This replaces the ${count} task line${count === 1 ? "" : "s"} currently listed — can't be undone.`, () => applyTemplate(job, templateId));
+      return;
+    }
+    if (e.target.id === "manageTemplatesBtn") { state.templatesOpen = true; render(); return; }
+    if (e.target.id === "templatesCloseBtn") { state.templatesOpen = false; render(); return; }
+    if (e.target.id === "addTemplateBtn") { addTemplate(); render(); return; }
+    const deleteTemplateBtn = e.target.closest("[data-delete-template]");
+    if (deleteTemplateBtn) {
+      const id = deleteTemplateBtn.dataset.deleteTemplate;
+      const tpl = state.taskTemplates.find(t => t.id === id);
+      askConfirm(`Delete the "${tpl ? tpl.name : "template"}" template? This can't be undone.`, () => deleteTemplate(id));
+      return;
+    }
+    const addTemplateTaskBtn = e.target.closest("[data-add-template-task]");
+    if (addTemplateTaskBtn) {
+      const templateId = addTemplateTaskBtn.dataset.addTemplateTask;
+      const input = document.querySelector(`[data-new-template-task="${templateId}"]`);
+      const name = input.value.trim();
+      if (!name) { input.focus(); return; }
+      addTemplateTask(templateId, name);
+      render(); return;
+    }
+    const removeTemplateTaskBtn = e.target.closest("[data-remove-template-task]");
+    if (removeTemplateTaskBtn) {
+      removeTemplateTask(removeTemplateTaskBtn.dataset.templateId, removeTemplateTaskBtn.dataset.removeTemplateTask);
       render(); return;
     }
     const triageToggleAdd = e.target.closest("[data-triage-toggle-add]");
@@ -4070,6 +4241,7 @@
       else if (state.importOpen) { state.importOpen = false; state.importDraft = null; render(); }
       else if (state.newJobOpen) { state.newJobOpen = false; state.newJobDraft = null; render(); }
       else if (state.delegationOpen) { state.delegationOpen = false; state.delegationDraft = null; render(); }
+      else if (state.templatesOpen) { state.templatesOpen = false; render(); }
       else if (state.triageJobId) { closeTriage(); render(); }
       else if (state.openJobId) closeJobModal();
       else if (state.editingActionId) closeActionModal();
@@ -4167,11 +4339,6 @@
       render(); return;
     }
     if (e.target.matches("select[data-hold-category]")) { setJobField(e.target.dataset.holdCategory, "holdCategory", e.target.value); render(); return; }
-    if (e.target.matches("input[data-triage-toggle]")) {
-      const ref = e.target.dataset.triageToggle;
-      state.triageSelected = e.target.checked ? [...state.triageSelected, ref] : state.triageSelected.filter(r => r !== ref);
-      render(); return;
-    }
     if (e.target.matches("input[data-job-select]")) {
       const id = e.target.dataset.jobSelect;
       state.boardSelection = e.target.checked ? [...new Set([...state.boardSelection, id])] : state.boardSelection.filter(x => x !== id);
@@ -4197,6 +4364,17 @@
       }
       if (u) u.isAdmin = e.target.checked;
       render(); return;
+    }
+    if (e.target.matches("input[data-template-name]")) {
+      // Deliberately no render() here: nothing else on screen reflects the template
+      // name mid-edit, and a full re-render on this field's blur — which is exactly
+      // when a click into another input on the same modal (e.g. "Add a task line…")
+      // fires it — would replace that input's fresh DOM node before its own value
+      // ever reaches state, silently dropping whatever was just typed into it.
+      const tpl = state.taskTemplates.find(t => t.id === e.target.dataset.templateName);
+      if (tpl) tpl.name = e.target.value;
+      saveState();
+      return;
     }
   });
   // Keep search inputs responsive without losing focus/caret on every keystroke.
@@ -4229,6 +4407,7 @@
       else if (state.importOpen) { state.importOpen = false; state.importDraft = null; render(); }
       else if (state.newJobOpen) { state.newJobOpen = false; state.newJobDraft = null; render(); }
       else if (state.delegationOpen) { state.delegationOpen = false; state.delegationDraft = null; render(); }
+      else if (state.templatesOpen) { state.templatesOpen = false; render(); }
       else if (state.triageJobId) { closeTriage(); render(); }
       else if (state.openJobId) closeJobModal();
       else if (state.editingActionId) closeActionModal();
