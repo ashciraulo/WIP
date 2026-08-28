@@ -841,6 +841,7 @@
       delegationDraft: null,
       triageJobId: null, // job currently open in the triage modal, or null
       triageSelected: [], // bcTaskRefs currently checked in that modal
+      triageAddOpenAt: null, // index into candidateTasks the open "add a candidate" form inserts after, or null when closed
       boardSelectMode: false, // Job Board bulk-select mode (Admin only) — off by default so nobody sees checkboxes by accident
       boardSelection: [], // job ids currently checked while boardSelectMode is on
       employeesView: "list", // "list" | "chart" — Employees page display toggle
@@ -1633,9 +1634,12 @@
     state.triageSelected = (job.candidateTasks || []).map(c => c.bcTaskRef); // default: everything selected, uncheck what doesn't apply
     render();
   }
-  function closeTriage() { state.triageJobId = null; state.triageSelected = []; }
-  // Selected candidates become real, unassigned task lines; everything left unchecked is
-  // remembered as rejected so a later re-import never queues it again.
+  function closeTriage() { state.triageJobId = null; state.triageSelected = []; state.triageAddOpenAt = null; }
+  // Selected candidates become real, unassigned task lines, in candidateTasks array
+  // order — so reordering the triage list here is what controls the final task-line
+  // order once confirmed. Everything left unchecked is remembered as rejected so a
+  // later re-import never queues it again (harmless no-op for a custom-added one,
+  // since its synthetic ref can never match anything BC sends).
   function confirmTriage(jobId, selectedRefs) {
     const job = jobById(jobId);
     if (!job) return;
@@ -1649,6 +1653,28 @@
     });
     job.candidateTasks = [];
     job.needsTriage = false;
+  }
+  // A candidate the coordinator adds by hand rather than one BC sent — same "requires
+  // adding and re-organising task lines" ask as the job-board list, just one stage
+  // earlier, before anything's a real task line yet. Auto-selected, same as every BC
+  // candidate defaults to selected.
+  function insertTriageCandidate(job, afterIdx, name, expectedCompletionDate) {
+    if (!job || !name) return;
+    const list = job.candidateTasks || (job.candidateTasks = []);
+    const ref = `custom#${uid("c")}`;
+    const insertPos = afterIdx == null ? list.length : Math.max(0, Math.min(afterIdx, list.length));
+    list.splice(insertPos, 0, { bcTaskRef: ref, name, expectedCompletionDate: expectedCompletionDate || null });
+    state.triageSelected.push(ref);
+  }
+  function reorderTriageCandidate(job, draggedRef, targetRef) {
+    if (!job || draggedRef === targetRef) return;
+    const list = job.candidateTasks || [];
+    const draggedIdx = list.findIndex(c => c.bcTaskRef === draggedRef);
+    if (draggedIdx === -1) return;
+    const [dragged] = list.splice(draggedIdx, 1);
+    const targetIdx = list.findIndex(c => c.bcTaskRef === targetRef);
+    if (targetIdx === -1) { list.splice(draggedIdx, 0, dragged); return; }
+    list.splice(targetIdx, 0, dragged);
   }
 
   // Job ownership: the person accountable for the job moving through every step,
@@ -2017,6 +2043,7 @@
     try { wireSliders(); } catch (err) { console.error("wireSliders failed:", err); }
     try { wireBoardDragDrop(); } catch (err) { console.error("wireBoardDragDrop failed:", err); }
     try { wireTaskLineDragDrop(); } catch (err) { console.error("wireTaskLineDragDrop failed:", err); }
+    try { wireTriageDragDrop(); } catch (err) { console.error("wireTriageDragDrop failed:", err); }
     try { wireOrgChartDragDrop(); } catch (err) { console.error("wireOrgChartDragDrop failed:", err); }
     try { wireTaskLineForm(); } catch (err) { console.error("wireTaskLineForm failed:", err); }
     saveState();
@@ -2842,7 +2869,7 @@
 
       <div class="panel">
         <h2>2. Triage what came in</h2>
-        <p style="color:var(--ink-soft); margin:0;">BC's task lines are generic — the same standard list shows up whether or not it actually applies to a given job. So a freshly-imported job doesn't land straight on the board: it sits in a <b>Needs triage</b> panel above it until the coordinator or production owner opens it and picks which candidate task lines actually apply. Confirm the ones that do (they become real task lines), and leave the rest unchecked — a rejected one is remembered, so it won't come back if the file is imported again. This is a one-time pass per job, not per re-import.</p>
+        <p style="color:var(--ink-soft); margin:0;">BC's task lines are generic — the same standard list shows up whether or not it actually applies to a given job. So a freshly-imported job doesn't land straight on the board: it sits in a <b>Needs triage</b> panel above it until the coordinator or production owner opens it and picks which candidate task lines actually apply. Confirm the ones that do (they become real task lines), and leave the rest unchecked — a rejected one is remembered, so it won't come back if the file is imported again. This is a one-time pass per job, not per re-import. BC's list is rarely the whole picture either — hover the gap between candidates (or before the first / after the last) for a "+" to add one BC didn't send, and drag a candidate's ⠿ handle to reorder the list; the order here is the order the real task lines land in once confirmed.</p>
       </div>
 
       <div class="panel">
@@ -3522,6 +3549,29 @@
       </div>`;
   }
 
+  // Same hover-"+"-to-insert / drag-to-reorder mechanic as the job-board task-line
+  // list, one stage earlier — the list here is candidates, not yet real task lines,
+  // but it's the same "adding and re-organising task lines" ask, and this is where it
+  // was originally asked for: reordering here controls the order they land in once
+  // confirmed (see confirmTriage).
+  function renderTriageDivider(afterIdx, isLast) {
+    if (state.triageAddOpenAt === afterIdx) return renderTriageAddForm(afterIdx);
+    if (isLast) return `<button class="btn-secondary" data-triage-toggle-add="${afterIdx}">+ Add task line</button>`;
+    return `<button type="button" class="task-line-divider" data-triage-toggle-add="${afterIdx}" title="Insert a task line here"><span>+</span></button>`;
+  }
+  function renderTriageAddForm(afterIdx) {
+    return `
+      <div class="edit-panel">
+        <div class="row2">
+          <input type="text" id="newTriageName" placeholder="Task name" style="flex:2; min-width:180px;">
+          <input type="date" id="newTriageExpected" title="Expected completion (optional)">
+        </div>
+        <div class="edit-actions">
+          <button class="btn-ghost-small" data-triage-toggle-add="${afterIdx}">Cancel</button>
+          <button class="btn-small" data-add-triage-candidate="${afterIdx}">Add task line</button>
+        </div>
+      </div>`;
+  }
   function renderTriageModalHtml() {
     const job = jobById(state.triageJobId);
     if (!job) return "";
@@ -3539,20 +3589,22 @@
             <button class="modal-close" id="triageCloseBtn">Close ✕</button>
           </div>
           <div class="modal-body">
-            <p style="color:var(--ink-soft); font-size:13px; margin:0;">These came in from BC's generic task list — pick what actually applies to this job. Unchecked ones won't come back on a re-import.</p>
+            <p style="color:var(--ink-soft); font-size:13px; margin:0;">These came in from BC's generic task list — pick what actually applies to this job, add any that didn't, and drag the ⠿ handle to reorder. Unchecked ones won't come back on a re-import.</p>
             <div class="toolbar" style="margin:10px 0 4px;">
               <button class="btn-ghost-small" id="triageSelectAll">Select all</button>
               <button class="btn-ghost-small" id="triageDeselectAll">Deselect all</button>
               <span style="color:var(--ink-faint); font-size:12.5px; margin-left:auto;">${selected.length} of ${candidates.length} selected</span>
             </div>
-            <div style="display:flex; flex-direction:column; gap:6px;">
-              ${candidates.map(c => `
-                <label class="card" style="display:flex; align-items:center; gap:10px; padding:10px 12px; cursor:pointer; ${selected.includes(c.bcTaskRef) ? "border-color:var(--accent);" : ""}">
+            <div style="display:flex; flex-direction:column; gap:0;">
+              ${candidates.map((c, i) => `
+                ${renderTriageDivider(i, false)}
+                <label class="card" draggable="true" data-triage-drag="${escapeAttr(c.bcTaskRef)}" style="display:flex; align-items:center; gap:10px; padding:10px 12px; margin:3px 0; cursor:grab; ${selected.includes(c.bcTaskRef) ? "border-color:var(--accent);" : ""}">
+                  <span class="tl-drag-handle" title="Drag to reorder">⠿</span>
                   <input type="checkbox" data-triage-toggle="${escapeAttr(c.bcTaskRef)}" ${selected.includes(c.bcTaskRef) ? "checked" : ""} style="width:auto;">
                   <span style="flex:1; font-weight:600; font-size:13px;">${c.name}</span>
                   ${c.expectedCompletionDate ? `<span style="color:var(--ink-faint); font-size:12px;">Exp. ${fmtShort(c.expectedCompletionDate)}</span>` : ""}
                 </label>`).join("")}
-              ${candidates.length === 0 ? `<div class="empty-note">Nothing left to triage on this job.</div>` : ""}
+              ${renderTriageDivider(candidates.length, true)}
             </div>
           </div>
           <div class="modal-foot"><button class="btn-primary" id="triageConfirmBtn">Confirm — add ${selected.length} task line${selected.length === 1 ? "" : "s"}</button></div>
@@ -3648,6 +3700,27 @@
         line.classList.remove("drag-over-line");
         const draggedId = e.dataTransfer.getData("application/x-task-line");
         if (draggedId) { reorderTaskLine(draggedId, line.dataset.taskDrag); render(); }
+      });
+    });
+  }
+  // Reorder candidates inside the triage modal — same mechanic as task-line reorder,
+  // own dataTransfer type so a drag started in one never resolves against the other.
+  function wireTriageDragDrop() {
+    document.querySelectorAll(".modal-body [data-triage-drag]").forEach(row => {
+      row.addEventListener("dragstart", e => {
+        row.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("application/x-triage-candidate", row.dataset.triageDrag);
+      });
+      row.addEventListener("dragend", () => row.classList.remove("dragging"));
+      row.addEventListener("dragover", e => { if (e.dataTransfer.types.includes("application/x-triage-candidate")) { e.preventDefault(); row.classList.add("drag-over-line"); } });
+      row.addEventListener("dragleave", () => row.classList.remove("drag-over-line"));
+      row.addEventListener("drop", e => {
+        e.preventDefault();
+        row.classList.remove("drag-over-line");
+        const draggedRef = e.dataTransfer.getData("application/x-triage-candidate");
+        const job = jobById(state.triageJobId);
+        if (draggedRef && job) { reorderTriageCandidate(job, draggedRef, row.dataset.triageDrag); render(); }
       });
     });
   }
@@ -3915,6 +3988,23 @@
       const jobId = state.triageJobId;
       confirmTriage(jobId, state.triageSelected);
       closeTriage();
+      render(); return;
+    }
+    const triageToggleAdd = e.target.closest("[data-triage-toggle-add]");
+    if (triageToggleAdd) {
+      const afterIdx = Number(triageToggleAdd.dataset.triageToggleAdd);
+      state.triageAddOpenAt = state.triageAddOpenAt === afterIdx ? null : afterIdx;
+      render(); return;
+    }
+    const addTriageCandidateBtn = e.target.closest("[data-add-triage-candidate]");
+    if (addTriageCandidateBtn) {
+      const afterIdx = Number(addTriageCandidateBtn.dataset.addTriageCandidate);
+      const job = jobById(state.triageJobId);
+      const name = document.getElementById("newTriageName").value.trim();
+      if (!name) { document.getElementById("newTriageName").focus(); return; }
+      const expectedVal = document.getElementById("newTriageExpected").value;
+      insertTriageCandidate(job, afterIdx, name, expectedVal ? new Date(expectedVal + "T00:00:00") : null);
+      state.triageAddOpenAt = null;
       render(); return;
     }
 
