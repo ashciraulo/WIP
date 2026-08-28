@@ -59,7 +59,12 @@
   .rail {
     width: 230px; flex: none; background: var(--rail-bg); color: #fff;
     display: flex; flex-direction: column; padding: 22px 14px; gap: 22px;
-    position: sticky; top: 0; height: 100vh;
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+    /* A fixed 100vh column with 8 nav items + the viewer picker + footer doesn't fit
+       every window — a shorter browser window, or a constrained iframe like the
+       Artifact viewer, clips it with no way to reach the items past the fold (this is
+       what "Analytics doesn't seem to be visible" turned out to be — Analytics and
+       Employees sit lowest in the list). Scroll the whole rail instead of clipping it. */
   }
   .rail-brand { padding: 0 8px; }
   .rail-brand .name { font-size: 17px; font-weight: 700; color: #fff; letter-spacing: -0.01em; }
@@ -373,7 +378,60 @@
   .modal-foot { padding: 14px 22px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
 
   .task-line { border: 1px solid var(--line); border-radius: 9px; padding: 12px 13px; }
+  .task-line[draggable="true"] { cursor: grab; }
+  .task-line.dragging { opacity: .4; }
+  .task-line.drag-over-line { border-color: var(--accent); box-shadow: 0 -2px 0 0 var(--accent); }
+  .tl-drag-handle { flex: none; color: var(--ink-faint); font-size: 14px; line-height: 1; cursor: grab; padding-top: 1px; }
   .task-line .tl-top { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+  /* The hover-to-insert gap between task lines: near-invisible at rest, a small "+"
+     circle fades in on hover so the row itself doesn't scream "click me" at a glance. */
+  .task-line-divider {
+    all: unset; box-sizing: border-box; display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 14px; cursor: pointer; position: relative;
+  }
+  .task-line-divider::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: transparent;
+  }
+  .task-line-divider span {
+    display: flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--neutral-soft); color: var(--ink-faint); font-size: 12px; font-weight: 700; opacity: 0;
+    transform: scale(.7); transition: opacity .12s, transform .12s, background .12s, color .12s;
+  }
+  .task-line-divider:hover::before { background: var(--line-strong); }
+  .task-line-divider:hover span { opacity: 1; transform: scale(1); background: var(--accent); color: #fff; }
+
+  /* Org chart: classic CSS-only tree, connector lines drawn with ::before/::after on
+     nested <ul>/<li> rather than an image or a JS layout pass. */
+  .org-chart-scroll { overflow-x: auto; padding-bottom: 6px; }
+  .org-tree-wrap { display: flex; flex-direction: column; align-items: center; gap: 28px; width: max-content; min-width: 100%; }
+  .org-tree, .org-tree ul { display: flex; padding-top: 24px; position: relative; list-style: none; margin: 0; }
+  .org-tree { padding-top: 0; }
+  .org-tree li { display: flex; flex-direction: column; align-items: center; padding: 24px 12px 0; position: relative; }
+  .org-tree li::before, .org-tree li::after {
+    content: ""; position: absolute; top: 0; right: 50%; width: 50%; height: 24px; border-top: 2px solid var(--line-strong);
+  }
+  .org-tree li::after { right: auto; left: 50%; border-left: 2px solid var(--line-strong); }
+  .org-tree li:only-child { padding-top: 0; }
+  .org-tree li:only-child::before, .org-tree li:only-child::after { display: none; }
+  .org-tree li:first-child::before, .org-tree li:last-child::after { border: none; }
+  .org-tree li:last-child::before { border-right: 2px solid var(--line-strong); border-radius: 0 6px 0 0; }
+  .org-tree li:first-child::after { border-radius: 6px 0 0 0; }
+  .org-tree > li { padding-top: 0; }
+  .org-tree > li::before, .org-tree > li::after { display: none; }
+  /* Vertical stem from a card down into the horizontal row connecting its children —
+     without this the ::before/::after pairs above just float, disconnected from the
+     card that owns them. */
+  .org-tree li > ul::before {
+    content: ""; position: absolute; top: 0; left: 50%; width: 0; height: 24px; border-left: 2px solid var(--line-strong);
+  }
+  .org-card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+    padding: 10px 14px; text-align: center; min-width: 150px; display: flex; flex-direction: column; align-items: center;
+  }
+  .org-card[draggable="true"] { cursor: grab; }
+  .org-card.dragging { opacity: .4; }
+  .org-card.drag-over-card { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+  .org-card.drag-invalid { border-color: var(--bad); box-shadow: 0 0 0 2px var(--bad); }
   .task-line .tl-seq { font-size: 10.5px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: .05em; }
   .task-line .tl-name { font-weight: 700; font-size: 13.5px; margin-top: 1px; }
   .task-line .tl-meta { color: var(--ink-faint); font-size: 12px; margin-top: 1px; display: flex; gap: 8px; }
@@ -778,6 +836,7 @@
       newJobOpen: false,
       newJobDraft: null,
       addTaskLineOpenFor: null, // jobId with its "+ Add task line" form expanded, or null
+      addTaskLineInsertAt: null, // sequence number the open form inserts after (null = append at the end)
       delegationOpen: false,
       delegationDraft: null,
       triageJobId: null, // job currently open in the triage modal, or null
@@ -1507,11 +1566,16 @@
   }
 
   /* ---- Production task lines: add/remove (Production stage only) ---- */
-  function addTaskLine(jobId, data) {
+  // afterSeq: sequence number to insert immediately after (0 = becomes the new first
+  // task line), or null to append at the end — same as the old always-append behavior.
+  function addTaskLine(jobId, data, afterSeq = null) {
     const job = jobById(jobId);
     if (!job || !data.name) return;
+    const existing = tasksForJob(jobId);
+    const insertPos = afterSeq == null ? existing.length : Math.max(0, Math.min(afterSeq, existing.length));
+    existing.forEach(t => { if (t.sequence > insertPos) t.sequence += 1; });
     const t = {
-      id: uid("t"), jobId, sequence: tasksForJob(jobId).length + 1, name: data.name, priority: data.priority || "Medium",
+      id: uid("t"), jobId, sequence: insertPos + 1, name: data.name, priority: data.priority || "Medium",
       status: "NOT_STARTED", completionPercent: 0, startedAt: null, completedAt: null,
       expectedCompletionDate: data.expectedCompletionDate || null, originalExpectedCompletionDate: data.expectedCompletionDate || null,
       bcTaskRef: data.bcTaskRef || null, // Job No. + Job Task No. from a BC import — lets a re-import skip a task line it already created
@@ -1526,6 +1590,18 @@
     if (!t) return;
     state.tasks = state.tasks.filter(x => x.id !== taskId);
     tasksForJob(t.jobId).forEach((x, i) => { x.sequence = i + 1; }); // keep "Task N" contiguous
+  }
+  // Drag-and-drop reorder: drop the dragged line immediately before the drop target,
+  // then renumber everyone in between — same "keep sequence contiguous" rule as delete.
+  function reorderTaskLine(draggedId, targetId) {
+    if (draggedId === targetId) return;
+    const dragged = taskById(draggedId);
+    const target = taskById(targetId);
+    if (!dragged || !target || dragged.jobId !== target.jobId) return;
+    const list = tasksForJob(dragged.jobId).filter(t => t.id !== draggedId);
+    const targetIdx = list.findIndex(t => t.id === targetId);
+    list.splice(targetIdx, 0, dragged);
+    list.forEach((t, i) => { t.sequence = i + 1; });
   }
 
   /* ---- Triage: winnowing BC's generic task list down to what applies to this job ---- */
@@ -1891,6 +1967,8 @@
     }
     wireSliders();
     wireBoardDragDrop();
+    wireTaskLineDragDrop();
+    wireOrgChartDragDrop();
     wireTaskLineForm();
     saveState();
   }
@@ -2744,12 +2822,12 @@
         <h2>Views at a glance</h2>
         <ul style="margin:0; padding-left:18px; color:var(--ink-soft);">
           <li style="margin-bottom:6px;"><b>My Dashboard</b> — your open work, and jobs about to hand over to you next.</li>
-          <li style="margin-bottom:6px;"><b>Job Board</b> — every job, every stage, drag-and-drop. The "where does everything stand" view. Open a job and expand "Job lifetime" for the path it's taken — time in each stage, plus any time logged on hold.</li>
+          <li style="margin-bottom:6px;"><b>Job Board</b> — every job, every stage, drag-and-drop. The "where does everything stand" view. Open a job and expand "Job lifetime" for the path it's taken — time in each stage, plus any time logged on hold. On a Production job, hover the gap above or below any task line for a "+" to insert one exactly there, or drag a line's ⠿ handle to reorder it.</li>
           <li style="margin-bottom:6px;"><b>Team</b> — visible if you manage people or lead a workshop pool.</li>
           <li style="margin-bottom:6px;"><b>WIP Meeting</b> — jobs actually in Production right now, current task and risk per job.</li>
           <li style="margin-bottom:6px;"><b>All Actions</b> — everything, one filterable table.</li>
           <li style="margin-bottom:6px;"><b>Analytics</b> — production forecast, due-date-change reasons, idle time.</li>
-          <li><b>Employees</b> — the staff list feeding every assignment dropdown in the tool, list or org chart. Editing needs Admin; anyone else gets a read-only view.</li>
+          <li><b>Employees</b> — the staff list feeding every assignment dropdown in the tool, as a list or a branching org chart. Editing (including dragging a card onto another to reassign who they report to) needs Admin; anyone else gets a read-only view.</li>
         </ul>
       </div>
 
@@ -2791,7 +2869,7 @@
           </div>
         </div>
         <p style="color:var(--ink-faint); font-size:12.5px; margin:0 0 16px;">${admin ? "Add your staff here — this list feeds the \"assigned to\" and \"manager\" dropdowns everywhere else." : "This list feeds the \"assigned to\" and \"manager\" dropdowns everywhere else in the tool."} In production this syncs from your organization's SharePoint / Microsoft Entra ID directory via SSO instead of being maintained by hand. Welding Workshop trades (welders, boilermakers) aren't listed individually here — see Team → capacity for that pool.</p>
-        ${state.employeesView === "chart" ? renderOrgChart() : renderEmployeesList(admin)}
+        ${state.employeesView === "chart" ? renderOrgChart(admin) : renderEmployeesList(admin)}
       </div>
       ${renderEquipmentPanel()}
     `;
@@ -2842,33 +2920,48 @@
         <button class="btn-secondary" id="addEmployeeBtn" style="margin-top:14px;">+ Add employee</button>`;
   }
 
-  // Recursive by managerId — a person with no manager (or whose manager somehow isn't
-  // in the list) is a root. visited guards against a bad managerId loop ever hanging
-  // the page instead of just rendering an odd tree.
-  function renderOrgChart() {
+  // A person is a descendant of `ofId` if walking up their manager chain reaches it —
+  // used to block a drag-drop that would make someone their own manager's manager.
+  function isDescendantOf(candidateId, ofId) {
+    let cur = userById(candidateId);
+    const seen = new Set();
+    while (cur && cur.managerId && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      if (cur.managerId === ofId) return true;
+      cur = userById(cur.managerId);
+    }
+    return false;
+  }
+  // A real branching tree (connector lines drawn in CSS via ::before/::after on nested
+  // <ul>/<li>, not just indentation) — Admins can drag a card onto another to reassign
+  // their manager. visited guards against a bad managerId loop ever hanging the page
+  // instead of just rendering an odd tree.
+  function renderOrgChart(admin) {
     const visited = new Set();
     function node(u, depth) {
       if (visited.has(u.id)) return "";
       visited.add(u.id);
       const reports = directReports(u.id);
       return `
-        <div style="${depth ? "margin-left:26px; padding-left:14px; border-left:2px solid var(--line); margin-top:8px;" : ""}">
-          <div class="card" style="display:flex; align-items:center; gap:10px; padding:9px 12px;">
-            <div style="flex:1; min-width:0;">
-              <div style="font-weight:700; font-size:13px; display:flex; align-items:center; gap:6px;">
-                ${escapeAttr(u.name)}
-                ${u.isAdmin ? `<span class="badge" style="background:var(--accent-soft); color:var(--accent-hover); font-size:10px;">Admin</span>` : ""}
-              </div>
-              <div style="color:var(--ink-faint); font-size:12px;">${escapeAttr(u.jobTitle || "—")}${u.department ? ` · ${escapeAttr(u.department)}` : ""}</div>
+        <li>
+          <div class="org-card" ${admin ? `draggable="true" data-org-drag="${u.id}"` : ""}>
+            <div style="font-weight:700; font-size:13px; display:flex; align-items:center; gap:6px; justify-content:center;">
+              ${escapeAttr(u.name)}
+              ${u.isAdmin ? `<span class="badge" style="background:var(--accent-soft); color:var(--accent-hover); font-size:10px;">Admin</span>` : ""}
             </div>
-            ${u.roleType ? `<span class="badge" style="background:var(--neutral-soft); color:var(--ink-soft); font-size:10.5px; flex:none;">${u.roleType}</span>` : ""}
+            <div style="color:var(--ink-faint); font-size:12px;">${escapeAttr(u.jobTitle || "—")}</div>
+            ${u.roleType ? `<span class="badge" style="background:var(--neutral-soft); color:var(--ink-soft); font-size:10px; margin-top:4px;">${u.roleType}</span>` : ""}
           </div>
-          ${reports.map(r => node(r, depth + 1)).join("")}
-        </div>`;
+          ${reports.length ? `<ul>${reports.map(r => node(r, depth + 1)).join("")}</ul>` : ""}
+        </li>`;
     }
     const roots = state.users.filter(u => !u.managerId || !userById(u.managerId));
     if (!roots.length) return `<div class="empty-note">No employees yet.</div>`;
-    return `<div>${roots.map(u => node(u, 0)).join("")}</div>`;
+    return `
+      ${admin ? `<p style="color:var(--ink-faint); font-size:11.5px; margin:0 0 12px;">Drag a card onto another to reassign who they report to.</p>` : ""}
+      <div class="org-chart-scroll"><div class="org-tree-wrap">
+        ${roots.map(u => `<ul class="org-tree">${node(u, 0)}</ul>`).join("")}
+      </div></div>`;
   }
 
   /* ---- Job modal (production) ---- */
@@ -3020,16 +3113,18 @@
               <span style="font-size:12.5px; color:var(--good); font-weight:600;">✓ All task lines are complete — ready to move this job on?</span>
               <button class="btn-small" data-set-stage="${job.id}" data-stage-value="NDT / Testing">Advance to NDT / Testing →</button>
             </div>` : ""}
-            ${tasks.map(task => renderTaskLine(task)).join("")}
-            ${tasks.length === 0 ? `<div class="empty-note">${job.stage === "Production" ? "No task lines yet — add the first one below so the shop floor has something to update." : "No production task lines yet — this job hasn't reached the Production stage."}</div>` : ""}
-            ${job.stage === "Production" ? renderAddTaskLineUI(job) : ""}
+            ${job.stage === "Production"
+              ? tasks.map((task, i) => renderTaskDivider(job, i, false) + renderTaskLine(task, true)).join("") + renderTaskDivider(job, tasks.length, true)
+              : `${tasks.map(task => renderTaskLine(task)).join("")}${tasks.length === 0 ? `<div class="empty-note">No production task lines yet — this job hasn't reached the Production stage.</div>` : ""}`}
           </div>
           <div class="modal-foot"><button class="btn-primary" id="modalSaveBtn">Save &amp; close</button></div>
         </div>
       </div>`;
   }
 
-  function renderTaskLine(task) {
+  // reorderable: only while the job is in Production, where task lines can actually be
+  // added/re-sequenced — drag handle stays out of the way everywhere else.
+  function renderTaskLine(task, reorderable = false) {
     const risk = assessTaskRisk(task);
     const who = taskAssigneeDisplay(task);
     const editing = state.pendingEdit && state.pendingEdit.taskId === task.id;
@@ -3042,9 +3137,10 @@
     const rejected = selfServiceRobotics ? lastDecidedNotice(task.id, state.currentUserId) : null;
     const sliderVal = pending && pending.percent != null ? pending.percent : task.completionPercent;
     return `
-      <div class="task-line">
+      <div class="task-line" ${reorderable ? `draggable="true" data-task-drag="${task.id}"` : ""}>
         <div class="tl-top">
-          <div>
+          ${reorderable ? `<span class="tl-drag-handle" title="Drag to reorder">⠿</span>` : ""}
+          <div style="flex:1; min-width:0;">
             <div class="tl-seq">Task ${task.sequence}</div>
             <div class="tl-name">${task.name}</div>
             <div class="tl-meta">
@@ -3117,10 +3213,23 @@
   // offered once a job reaches Production. Equipment for a robotics task isn't
   // picked here; it starts unassigned and gets set via the existing reassign
   // controls on the line once it exists, same as reassigning any other task.
-  function renderAddTaskLineUI(job) {
-    if (state.addTaskLineOpenFor !== job.id) {
-      return `<button class="btn-secondary" data-toggle-add-task="${job.id}">+ Add task line</button>`;
+  //
+  // Rendered as a divider between every pair of task lines (and before the first /
+  // after the last) rather than one button at the bottom — hover any gap to insert a
+  // line exactly there, instead of always appending and manually dragging it into
+  // place. The trailing divider (after the last line, or the only one when there are
+  // none yet) stays visibly labeled "+ Add task line" so that path isn't hidden behind
+  // a hover.
+  function renderTaskDivider(job, afterSeq, isLast) {
+    if (state.addTaskLineOpenFor === job.id && state.addTaskLineInsertAt === afterSeq) {
+      return renderAddTaskLineForm(job, afterSeq);
     }
+    if (isLast) {
+      return `<button class="btn-secondary" data-toggle-add-task="${job.id}" data-insert-after="${afterSeq}">+ Add task line</button>`;
+    }
+    return `<button type="button" class="task-line-divider" data-toggle-add-task="${job.id}" data-insert-after="${afterSeq}" title="Insert a task line here"><span>+</span></button>`;
+  }
+  function renderAddTaskLineForm(job, afterSeq) {
     const pools = WORKSHOP_POOLS.u_dave.roles.map(r => r.role);
     return `
       <div class="edit-panel">
@@ -3143,8 +3252,8 @@
           <div id="taskAssignVendor" style="display:none;"><input type="text" id="newTaskVendor" placeholder="Vendor name"></div>
         </div>
         <div class="edit-actions">
-          <button class="btn-ghost-small" data-toggle-add-task="${job.id}">Cancel</button>
-          <button class="btn-small" data-add-task-line="${job.id}">Add task line</button>
+          <button class="btn-ghost-small" data-toggle-add-task="${job.id}" data-insert-after="${afterSeq}">Cancel</button>
+          <button class="btn-small" data-add-task-line="${job.id}" data-insert-after="${afterSeq}">Add task line</button>
         </div>
       </div>`;
   }
@@ -3470,6 +3579,66 @@
       });
     });
   }
+  // Reorder task lines within a job's Production list — drop one line onto another to
+  // move the dragged one in immediately before it. Deliberately a different
+  // dataTransfer payload (task ids, not job ids) so a stray drag can't cross-wire with
+  // the Job Board's own drag-and-drop if both were ever visible at once.
+  function wireTaskLineDragDrop() {
+    document.querySelectorAll(".task-line[draggable]").forEach(line => {
+      line.addEventListener("dragstart", e => {
+        line.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("application/x-task-line", line.dataset.taskDrag);
+      });
+      line.addEventListener("dragend", () => line.classList.remove("dragging"));
+      line.addEventListener("dragover", e => { if (e.dataTransfer.types.includes("application/x-task-line")) { e.preventDefault(); line.classList.add("drag-over-line"); } });
+      line.addEventListener("dragleave", () => line.classList.remove("drag-over-line"));
+      line.addEventListener("drop", e => {
+        e.preventDefault();
+        line.classList.remove("drag-over-line");
+        const draggedId = e.dataTransfer.getData("application/x-task-line");
+        if (draggedId) { reorderTaskLine(draggedId, line.dataset.taskDrag); render(); }
+      });
+    });
+  }
+  // Org chart drag-and-drop: drop a card onto another to make that the new manager.
+  // Rejects dropping onto yourself or one of your own reports (cycle guard), flagged
+  // live on dragover rather than only failing silently after the drop.
+  function wireOrgChartDragDrop() {
+    document.querySelectorAll(".org-card[draggable]").forEach(card => {
+      card.addEventListener("dragstart", e => {
+        card.classList.add("dragging");
+        draggingOrgUserId = card.dataset.orgDrag;
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("application/x-org-user", card.dataset.orgDrag);
+      });
+      card.addEventListener("dragend", () => { card.classList.remove("dragging"); draggingOrgUserId = null; });
+      card.addEventListener("dragover", e => {
+        if (!e.dataTransfer.types.includes("application/x-org-user")) return;
+        e.preventDefault();
+        const draggedId = draggingOrgUserId;
+        const targetId = card.dataset.orgDrag;
+        const invalid = draggedId && (draggedId === targetId || isDescendantOf(targetId, draggedId));
+        card.classList.toggle("drag-invalid", !!invalid);
+        card.classList.toggle("drag-over-card", !invalid);
+      });
+      card.addEventListener("dragleave", () => { card.classList.remove("drag-over-card", "drag-invalid"); });
+      card.addEventListener("drop", e => {
+        e.preventDefault();
+        card.classList.remove("drag-over-card", "drag-invalid");
+        const draggedId = e.dataTransfer.getData("application/x-org-user");
+        const targetId = card.dataset.orgDrag;
+        if (!draggedId || draggedId === targetId || isDescendantOf(targetId, draggedId)) return;
+        const u = userById(draggedId);
+        if (u) u.managerId = targetId;
+        render();
+      });
+    });
+  }
+  // dragover fires far too often (and without dataTransfer.getData access mid-drag,
+  // for security) to read the dragged id from the event itself — dragstart stashes it
+  // here once, purely for the live valid/invalid-drop highlight above.
+  let draggingOrgUserId = null;
 
   /* ---- slider wiring ---- */
   function wireSliders() {
@@ -3700,10 +3869,18 @@
     }
 
     const toggleAddTask = e.target.closest("[data-toggle-add-task]");
-    if (toggleAddTask) { const id = toggleAddTask.dataset.toggleAddTask; state.addTaskLineOpenFor = state.addTaskLineOpenFor === id ? null : id; render(); return; }
+    if (toggleAddTask) {
+      const id = toggleAddTask.dataset.toggleAddTask;
+      const afterSeq = Number(toggleAddTask.dataset.insertAfter);
+      const alreadyOpenHere = state.addTaskLineOpenFor === id && state.addTaskLineInsertAt === afterSeq;
+      state.addTaskLineOpenFor = alreadyOpenHere ? null : id;
+      state.addTaskLineInsertAt = alreadyOpenHere ? null : afterSeq;
+      render(); return;
+    }
     const addTaskBtn = e.target.closest("[data-add-task-line]");
     if (addTaskBtn) {
       const jobId = addTaskBtn.dataset.addTaskLine;
+      const afterSeq = Number(addTaskBtn.dataset.insertAfter);
       const name = document.getElementById("newTaskName").value.trim();
       if (!name) { document.getElementById("newTaskName").focus(); return; }
       const expectedVal = document.getElementById("newTaskExpected").value;
@@ -3715,8 +3892,9 @@
         poolCount: Number(document.getElementById("newTaskPoolCount").value) || 1,
         vendorName: document.getElementById("newTaskVendor").value.trim(),
         expectedCompletionDate: expectedVal ? new Date(expectedVal + "T00:00:00") : null,
-      });
+      }, afterSeq);
       state.addTaskLineOpenFor = null;
+      state.addTaskLineInsertAt = null;
       render(); return;
     }
     const deleteTaskBtn = e.target.closest("[data-delete-task]");
