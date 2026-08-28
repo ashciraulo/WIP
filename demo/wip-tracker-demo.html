@@ -2370,21 +2370,24 @@
       </div>
       <p style="color:var(--ink-faint); font-size:11.5px; margin:-10px 0 16px;">A testing utility — e.g. clearing out a bad or duplicate import to re-run it. Deletes the job and any task lines on it. Can't be undone.</p>` : ""}
       ${triageQueue.length ? `
-      <div class="panel" style="margin-bottom:18px; border-color:var(--warn-strong); background:var(--warn-soft);">
-        <h2 style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">Needs triage <span class="badge warn">${triageQueue.length}</span></h2>
-        <p style="color:var(--ink-soft); font-size:12.5px; margin:0 0 12px;">Task lines came in from BC's generic list — pick what applies before these jobs show up on the board below.</p>
-        <div style="display:flex; flex-direction:column; gap:8px;">
+      <section class="block owner-block" style="margin-bottom:18px;">
+        <div class="block-head">
+          <h2>Needs triage</h2>
+          <span class="badge warn" style="font-size:10.5px; padding:1px 7px;">${triageQueue.length}</span>
+          <span class="block-count">Task lines came in generic from BC — pick what applies before these jobs show up on the board below.</span>
+        </div>
+        <div class="panel" style="padding:0; border-color:var(--warn-strong);">
           ${triageQueue.map(j => `
-            <div class="card handover-row" style="display:flex; align-items:center; gap:10px; ${selectMode ? "" : "cursor:pointer;"}" ${selectMode ? "" : `data-open-triage="${j.id}"`}>
+            <div class="approval-row" style="${selectMode ? "" : "cursor:pointer;"}" ${selectMode ? "" : `data-open-triage="${j.id}"`}>
               ${selectMode ? `<input type="checkbox" data-job-select="${j.id}" ${selection.includes(j.id) ? "checked" : ""} style="width:auto; flex:none;">` : ""}
-              <div style="flex:1; ${selectMode ? "" : ""}" ${selectMode ? `data-open-triage="${j.id}"` : ""}>
-                <div class="job-title">${j.jobNumber} · ${j.name}${j.customer ? ` — ${j.customer}` : ""}</div>
-                <div class="job-meta">${j.candidateTasks.length} candidate task line${j.candidateTasks.length === 1 ? "" : "s"} to review</div>
+              <div style="flex:1; min-width:0;" ${selectMode ? `data-open-triage="${j.id}"` : ""}>
+                <div style="font-weight:700; font-size:13.5px;">${j.jobNumber} · ${j.name}${j.customer ? ` — ${j.customer}` : ""}</div>
+                <div style="color:var(--ink-faint); font-size:12px; margin-top:3px;">${j.candidateTasks.length} candidate task line${j.candidateTasks.length === 1 ? "" : "s"} to review</div>
               </div>
-              <div class="handover-right"><span class="badge warn">Review →</span></div>
+              <span class="badge warn" style="flex:none;">Review →</span>
             </div>`).join("")}
         </div>
-      </div>` : ""}
+      </section>` : ""}
       <div class="toolbar">
         <input type="text" id="boardSearch" placeholder="Search job, number or customer…" value="${escapeAttr(f.search)}">
         <select id="boardPriority">
