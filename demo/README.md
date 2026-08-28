@@ -33,9 +33,18 @@ a working tool in front of people this week, not after a backend and auth are st
   Kanban board, plus the underlying task-line model (staff assignment, Welding Workshop headcount
   pools, Robotics staff+equipment with a team-leader approval workflow) once a job reaches
   Production.
-- BC `.xlsx`/CSV import with column mapping, job-task-row grouping, and optional task-line seeding.
+- BC `.xlsx`/CSV import with column mapping and job-task-row grouping. Task lines aren't created
+  directly from an import — BC's task list is generic, not job-specific — they're queued for
+  triage: a coordinator or production owner picks what applies before the job appears on the board.
 - Delegation: a team leader's actual open tasks, actions, and owned jobs move live onto whoever's
   covering for them, and back off once the delegation ends — no manual reassignment either way.
+- Job lifetime tracking: a collapsible timeline in the job modal showing the path a job has taken —
+  proportional time in each stage, plus a separate log of time spent on hold/idle.
+- Employees as a list or an org chart (by manager), with a defined Role dropdown alongside free-text
+  job title, and an Admin permission (not a role — a checkbox on a person) gating who can edit the
+  directory, reassign managers, or grant Admin to someone else.
+- Admin-only bulk job deletion on the Job Board (with a one-click "select everything pending
+  triage") for cleaning up a bad or duplicate import without clicking through jobs one at a time.
 - Production forecast, due-date-change and idle-time analytics, and an in-app Getting Started guide
   for anyone testing it cold.
 

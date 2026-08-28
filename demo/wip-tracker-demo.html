@@ -467,6 +467,17 @@
   const STAGE_STALL_DAYS = 10;
   const HOLD_CATEGORIES = ["Material", "Engineering / Drawing", "Client Info", "Other"];
 
+  // Draft role taxonomy from the project plan's Roles sheet — deliberately coarse and
+  // not yet wired into per-screen visibility (roles aren't finalized company-side yet).
+  // For now this drives the Employees org chart and gives a defined list to pick from
+  // instead of free-typing a role. "Admin" is intentionally not in this list — it's a
+  // permission level granted on top of a role (see isAdmin below), not a role itself.
+  const ROLE_OPTIONS = ["Workshop / Trade Staff", "Team Leader / Production Owner", "Job Coordinator", "Manager", "Other / TBD"];
+  // Admin is additive: whoever can add/edit employees and arrange the org chart,
+  // regardless of what role they otherwise hold — nobody's whole job here is running
+  // this tool, so it's a flag on a person, not a 6th role.
+  function isAdmin(userId) { const u = userById(userId); return !!(u && u.isAdmin); }
+
   const REASON_LABELS = {
     MATERIAL_DELAY: "Material delay", STAFF_ABSENCE: "Staff absence", REWORK: "Rework required",
     CLIENT_DELAY: "Client delay", SCOPE_CHANGE: "Scope change", WAITING_ON_THIRD_PARTY: "Waiting on third party", OTHER: "Other",
@@ -494,18 +505,26 @@
     // Robotics (full staff+equipment tracking). Sam/Mike/Liz/Tom cover the other
     // departments a job passes through.
     const users = [
-      { id: "u_priya", name: "Priya Nair", jobTitle: "Production Manager", department: "Production", managerId: null },
-      { id: "u_dave", name: "Dave Ferreira", jobTitle: "Welding Workshop Team Leader", department: "Welding Workshop", managerId: "u_priya" },
-      { id: "u_nomvula", name: "Nomvula Dlamini", jobTitle: "Robotics Team Leader", department: "Robotics", managerId: "u_priya" },
+      { id: "u_priya", name: "Priya Nair", jobTitle: "Production Manager", department: "Production", managerId: null,
+        roleType: "Manager", isAdmin: true },
+      { id: "u_dave", name: "Dave Ferreira", jobTitle: "Welding Workshop Team Leader", department: "Welding Workshop", managerId: "u_priya",
+        roleType: "Team Leader / Production Owner", isAdmin: false },
+      { id: "u_nomvula", name: "Nomvula Dlamini", jobTitle: "Robotics Team Leader", department: "Robotics", managerId: "u_priya",
+        roleType: "Team Leader / Production Owner", isAdmin: false },
       { id: "u_jordan", name: "Jordan Blake", jobTitle: "Robotic Coating Operator", department: "Robotics", managerId: "u_nomvula",
-        capabilities: ["HVOF Spray", "Plasma Spray", "Arc Spray"] },
+        capabilities: ["HVOF Spray", "Plasma Spray", "Arc Spray"], roleType: "Workshop / Trade Staff", isAdmin: false },
       { id: "u_ben", name: "Ben Osei", jobTitle: "Robotic Welding Operator", department: "Robotics", managerId: "u_nomvula",
-        capabilities: ["Robotic MIG Welding"] },
-      { id: "u_sam", name: "Sam Ortiz", jobTitle: "Quality Inspector", department: "Quality", managerId: "u_priya" },
-      { id: "u_mike", name: "Mike Chen", jobTitle: "Estimator", department: "Estimating", managerId: "u_priya" },
-      { id: "u_liz", name: "Liz Grant", jobTitle: "Stores Coordinator", department: "Stores", managerId: "u_priya" },
-      { id: "u_tom", name: "Tom Reilly", jobTitle: "Design Engineer", department: "Engineering", managerId: "u_priya" },
-      { id: "u_sipho", name: "Sipho Ndlovu", jobTitle: "Senior Welder", department: "Welding Workshop", managerId: "u_dave" },
+        capabilities: ["Robotic MIG Welding"], roleType: "Workshop / Trade Staff", isAdmin: false },
+      { id: "u_sam", name: "Sam Ortiz", jobTitle: "Quality Inspector", department: "Quality", managerId: "u_priya",
+        roleType: "Workshop / Trade Staff", isAdmin: false },
+      { id: "u_mike", name: "Mike Chen", jobTitle: "Estimator", department: "Estimating", managerId: "u_priya",
+        roleType: "Job Coordinator", isAdmin: false },
+      { id: "u_liz", name: "Liz Grant", jobTitle: "Stores Coordinator", department: "Stores", managerId: "u_priya",
+        roleType: "Other / TBD", isAdmin: false },
+      { id: "u_tom", name: "Tom Reilly", jobTitle: "Design Engineer", department: "Engineering", managerId: "u_priya",
+        roleType: "Other / TBD", isAdmin: false },
+      { id: "u_sipho", name: "Sipho Ndlovu", jobTitle: "Senior Welder", department: "Welding Workshop", managerId: "u_dave",
+        roleType: "Workshop / Trade Staff", isAdmin: false },
     ];
 
     // Named, capability-tagged cells — the equipment half of Robotics' full resource
@@ -546,11 +565,23 @@
         status: "ACTIVE", stage: "Production", stageEnteredAt: daysAgo(11), coordinatorId: "u_mike", ownerId: "u_nomvula", onHold: false },
       { id: "j5", jobNumber: "WJ-1005", name: "Chassis Frame Weld", customer: "Meridian Aerospace",
         priority: "Medium", requiredDeliveryDate: daysAgo(5), internalTargetDate: daysAgo(8), dueDate: daysAgo(5),
-        status: "COMPLETE", stage: "Complete", stageEnteredAt: daysAgo(6), coordinatorId: "u_mike", ownerId: "u_dave", onHold: false },
+        status: "COMPLETE", stage: "Complete", stageEnteredAt: daysAgo(6), coordinatorId: "u_mike", ownerId: "u_dave", onHold: false,
+        // backfilled so the job-lifetime timeline has a rich, already-finished example to show immediately
+        stageHistory: [
+          { stage: "Order Received", enteredAt: daysAgo(35), exitedAt: daysAgo(30) },
+          { stage: "Engineering", enteredAt: daysAgo(30), exitedAt: daysAgo(26) },
+          { stage: "Procurement", enteredAt: daysAgo(26), exitedAt: daysAgo(20) },
+          { stage: "Materials Available", enteredAt: daysAgo(20), exitedAt: daysAgo(17) },
+          { stage: "Production", enteredAt: daysAgo(17), exitedAt: daysAgo(9) },
+          { stage: "NDT / Testing", enteredAt: daysAgo(9), exitedAt: daysAgo(7) },
+          { stage: "Documentation", enteredAt: daysAgo(7), exitedAt: daysAgo(6) },
+        ], holdHistory: [] },
       { id: "j6", jobNumber: "WJ-1033", name: "Cr3C2 Shroud Coat", customer: "Coastal Hydraulics",
         priority: "Medium", requiredDeliveryDate: daysFromNow(30), internalTargetDate: daysFromNow(25), dueDate: daysFromNow(30),
         status: "ACTIVE", stage: "Procurement", stageEnteredAt: daysAgo(6), coordinatorId: "u_mike", ownerId: "u_mike",
-        onHold: true, holdCategory: "Material", holdReason: "Plate stock backordered — supplier now quoting 2 more weeks." },
+        onHold: true, holdCategory: "Material", holdReason: "Plate stock backordered — supplier now quoting 2 more weeks.",
+        stageHistory: [{ stage: "Order Received", enteredAt: daysAgo(9), exitedAt: daysAgo(6) }],
+        holdHistory: [{ category: "Material", reason: "Plate stock backordered — supplier now quoting 2 more weeks.", startedAt: daysAgo(4), endedAt: null }] },
       { id: "j7", jobNumber: "WJ-1041", name: "Conveyor Frame Fabrication", customer: "Austral Materials Handling",
         priority: "Medium", requiredDeliveryDate: daysFromNow(21), internalTargetDate: daysFromNow(17), dueDate: daysFromNow(21),
         status: "ACTIVE", stage: "Production", stageEnteredAt: daysAgo(4), coordinatorId: "u_mike", ownerId: "u_dave", onHold: false }, // still literally Dave's — Sipho sees it live via the delegation below, nothing here gets mutated
@@ -569,7 +600,10 @@
         ] },
       { id: "j9", jobNumber: "WJ-1039", name: "Skid Frame Modification", customer: "Northline Industrial",
         priority: "Medium", requiredDeliveryDate: daysFromNow(38), internalTargetDate: daysFromNow(32), dueDate: daysFromNow(38),
-        status: "ACTIVE", stage: "Engineering", stageEnteredAt: daysAgo(12), coordinatorId: "u_mike", ownerId: "u_mike",
+        status: "ACTIVE", stage: "Engineering", stageEnteredAt: daysAgo(12),
+        stageHistory: [{ stage: "Order Received", enteredAt: daysAgo(15), exitedAt: daysAgo(12) }],
+        holdHistory: [{ category: "Client Info", reason: "Waiting on client-confirmed skid dimensions before drawings can be finalised.", startedAt: daysAgo(5), endedAt: null }],
+        coordinatorId: "u_mike", ownerId: "u_mike",
         onHold: true, holdCategory: "Client Info", holdReason: "Waiting on client-confirmed skid dimensions before drawings can be finalised." },
       { id: "j10", jobNumber: "WJ-1037", name: "Manifold Assembly", customer: "Coastal Hydraulics",
         priority: "Medium", requiredDeliveryDate: daysFromNow(32), internalTargetDate: daysFromNow(27), dueDate: daysFromNow(32),
@@ -748,6 +782,9 @@
       delegationDraft: null,
       triageJobId: null, // job currently open in the triage modal, or null
       triageSelected: [], // bcTaskRefs currently checked in that modal
+      boardSelectMode: false, // Job Board bulk-select mode (Admin only) — off by default so nobody sees checkboxes by accident
+      boardSelection: [], // job ids currently checked while boardSelectMode is on
+      employeesView: "list", // "list" | "chart" — Employees page display toggle
     };
   }
   function reviveJobDates(j) {
@@ -759,6 +796,8 @@
     j.needsTriage = !!j.needsTriage;
     j.candidateTasks = (j.candidateTasks || []).map(c => ({ ...c, expectedCompletionDate: c.expectedCompletionDate ? new Date(c.expectedCompletionDate) : null }));
     j.rejectedTaskRefs = j.rejectedTaskRefs || [];
+    j.stageHistory = (j.stageHistory || []).map(s => ({ ...s, enteredAt: new Date(s.enteredAt), exitedAt: new Date(s.exitedAt) }));
+    j.holdHistory = (j.holdHistory || []).map(h => ({ ...h, startedAt: new Date(h.startedAt), endedAt: h.endedAt ? new Date(h.endedAt) : null }));
     return j;
   }
   function revivePendingDates(p) { p.submittedAt = new Date(p.submittedAt); p.decidedAt = p.decidedAt ? new Date(p.decidedAt) : null; return p; }
@@ -772,6 +811,13 @@
   }
   function reviveChangeDates(c) { c.oldDate = c.oldDate ? new Date(c.oldDate) : null; c.newDate = new Date(c.newDate); c.changedAt = new Date(c.changedAt); return c; }
   function reviveGapDates(g) { g.idleStart = new Date(g.idleStart); g.idleEnd = g.idleEnd ? new Date(g.idleEnd) : null; return g; }
+  // Backfills roleType/isAdmin on a user loaded from localStorage saved before those
+  // fields existed, so someone mid-testing doesn't silently end up with neither set.
+  function reviveUser(u) {
+    if (u.roleType === undefined) u.roleType = null;
+    if (u.isAdmin === undefined) u.isAdmin = false;
+    return u;
+  }
 
   /* ============================================================
      LOCAL PERSISTENCE
@@ -803,7 +849,10 @@
       if (saved.idleGaps) base.idleGaps = saved.idleGaps.map(reviveGapDates);
       if (saved.pendingUpdates) base.pendingUpdates = saved.pendingUpdates.map(revivePendingDates);
       if (saved.delegations) base.delegations = saved.delegations.map(reviveDelegationDates);
-      if (saved.users) base.users = saved.users;
+      if (saved.users) base.users = saved.users.map(reviveUser);
+      // Never let a migration from before Admin existed leave nobody able to edit the
+      // employee directory — fall back to Priya (or the first user) as Admin.
+      if (!base.users.some(u => u.isAdmin)) { const fallback = base.users.find(u => u.id === "u_priya") || base.users[0]; if (fallback) fallback.isAdmin = true; }
       if (saved.actions) base.actions = saved.actions;
       if (saved.robotEquipment) base.robotEquipment = saved.robotEquipment;
       if (saved.currentUserId && base.users.some(u => u.id === saved.currentUserId)) base.currentUserId = saved.currentUserId;
@@ -974,6 +1023,8 @@
   function setJobStage(jobId, stage) {
     const job = jobById(jobId);
     if (!job || !STAGES.includes(stage) || stage === job.stage) return;
+    job.stageHistory = job.stageHistory || [];
+    job.stageHistory.push({ stage: job.stage, enteredAt: job.stageEnteredAt, exitedAt: new Date() });
     job.stage = stage;
     job.stageEnteredAt = new Date();
     if (stage === "Complete") job.status = "COMPLETE"; else if (job.status === "COMPLETE") job.status = "ACTIVE";
@@ -981,6 +1032,13 @@
   function setJobHold(jobId, onHold, holdCategory, holdReason) {
     const job = jobById(jobId);
     if (!job) return;
+    job.holdHistory = job.holdHistory || [];
+    if (onHold && !job.onHold) {
+      job.holdHistory.push({ category: holdCategory, reason: holdReason, startedAt: new Date(), endedAt: null });
+    } else if (!onHold && job.onHold) {
+      const open = [...job.holdHistory].reverse().find(h => !h.endedAt);
+      if (open) open.endedAt = new Date();
+    }
     job.onHold = onHold;
     job.holdCategory = onHold ? holdCategory : null;
     job.holdReason = onHold ? holdReason : "";
@@ -993,6 +1051,38 @@
     if (!job) return;
     job[field] = value;
     if (field === "requiredDeliveryDate") job.dueDate = value;
+  }
+
+  /* ---- Job lifetime: the path a job took, and how long it sat idle ---- */
+  // Every stage the job has fully passed through, plus its current stage as a still-open
+  // segment (exitedAt: null) running up to now — this is "the path a job took" in full.
+  function jobStageSegments(job) {
+    const past = (job.stageHistory || []).map(s => ({ ...s, days: Math.max(0, (s.exitedAt.getTime() - s.enteredAt.getTime()) / DAY) }));
+    const current = { stage: job.stage, enteredAt: job.stageEnteredAt, exitedAt: null, days: Math.max(0, (Date.now() - job.stageEnteredAt.getTime()) / DAY) };
+    return [...past, current];
+  }
+  // Every hold period, past and (if still on hold) open — this is "sitting idle": time
+  // nobody could move the job forward for a logged reason, distinct from stage duration.
+  function jobHoldSegments(job) {
+    return (job.holdHistory || []).map(h => ({ ...h, days: Math.max(0, ((h.endedAt ? h.endedAt.getTime() : Date.now()) - h.startedAt.getTime()) / DAY) }));
+  }
+  function jobTotalIdleDays(job) { return jobHoldSegments(job).reduce((s, h) => s + h.days, 0); }
+  // A small qualitative palette across the stage list, cohesive with the app's
+  // navy/terracotta/cream theme — Production (the one stage with real task-level detail
+  // underneath) gets the accent color so it reads as the "main event" in the timeline.
+  const STAGE_COLORS = ["#c9d6df", "#a9c4d1", "#8fb3c4", "#6f9fb5", "#e0523c", "#cf7a63", "#b58a6a", "#8a97a3", "#3d7a4d"];
+  function stageColor(stage) { const i = STAGES.indexOf(stage); return STAGE_COLORS[i] ?? "#c9d6df"; }
+
+  // Bulk delete: a testing utility for clearing out a bad/duplicate import in one shot,
+  // rather than clicking through jobs one at a time. Cascades to that job's task lines
+  // (and any pending approvals riding on them) so nothing orphaned is left behind.
+  function deleteJobs(jobIds) {
+    const idSet = new Set(jobIds);
+    const doomedTaskIds = new Set(state.tasks.filter(t => idSet.has(t.jobId)).map(t => t.id));
+    state.tasks = state.tasks.filter(t => !idSet.has(t.jobId));
+    state.pendingUpdates = state.pendingUpdates.filter(p => !doomedTaskIds.has(p.taskId));
+    state.jobs = state.jobs.filter(j => !idSet.has(j.id));
+    state.boardSelection = (state.boardSelection || []).filter(id => !idSet.has(id));
   }
   // First-pass forecast, not a solved problem (the source doc names reliable forecasting
   // as an open pain point): on hold, pad the internal target by a flat estimate; in
@@ -1381,7 +1471,7 @@
           priority, requiredDeliveryDate, internalTargetDate: internalTargetDate || requiredDeliveryDate, dueDate: requiredDeliveryDate,
           actualCompletionDate, customerNo, customerPO, contractValue, jobType, industryType, bcOperationalStatus, bcPostingStatus,
           status: isDone ? "COMPLETE" : "ACTIVE", stage: isDone ? "Complete" : "Order Received", stageEnteredAt: isDone ? actualCompletionDate : new Date(),
-          coordinatorId, ownerId: coordinatorId, onHold: false,
+          coordinatorId, ownerId: coordinatorId, onHold: false, stageHistory: [], holdHistory: [],
         };
         state.jobs.push(job);
         created++;
@@ -1774,6 +1864,10 @@
     // replacement fixes that for every interaction at once, not just one button.
     const oldModalBody = document.querySelector(".modal-body");
     const modalScroll = oldModalBody ? oldModalBody.scrollTop : null;
+    // Same problem, same fix, for any <details> (e.g. the job lifetime panel) inside the
+    // modal: a freshly-rendered <details> defaults closed, so without this, opening it
+    // and then touching anything else on the modal would silently collapse it again.
+    const openDetailsIdx = oldModalBody ? [...oldModalBody.querySelectorAll("details")].reduce((acc, d, i) => (d.open && acc.push(i), acc), []) : [];
     renderRailNav();
     renderViewerSelect();
     renderRailFooter();
@@ -1789,7 +1883,11 @@
     renderModal();
     if (modalScroll != null) {
       const newModalBody = document.querySelector(".modal-body");
-      if (newModalBody) newModalBody.scrollTop = modalScroll;
+      if (newModalBody) {
+        newModalBody.scrollTop = modalScroll;
+        const newDetails = newModalBody.querySelectorAll("details");
+        openDetailsIdx.forEach(i => { if (newDetails[i]) newDetails[i].open = true; });
+      }
     }
     wireSliders();
     wireBoardDragDrop();
@@ -2246,6 +2344,9 @@
     });
     const stalled = jobs.filter(isStalled).length;
     const triageQueue = jobsNeedingTriage();
+    const admin = isAdmin(state.currentUserId);
+    const selectMode = admin && state.boardSelectMode;
+    const selection = state.boardSelection || [];
 
     return `
       <div class="view-header">
@@ -2254,23 +2355,34 @@
           <p class="lede">Every job, every stage, one screen — drag a card to move it, or click it for the full detail. This is the "where does everything actually stand" view.</p>
         </div>
         <div style="display:flex; gap:8px;">
+          ${admin ? `<button class="btn-secondary" id="boardSelectModeBtn">${selectMode ? "✕ Done selecting" : "☑ Select jobs"}</button>` : ""}
           <button class="btn-secondary" data-open-import="1">⬆ Import from BC</button>
           <button class="btn-primary" data-open-new-job="1">+ New Job</button>
         </div>
       </div>
+      ${selectMode ? `
+      <div class="panel" style="margin-bottom:18px; padding:11px 15px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; background:var(--neutral-soft); border-color:var(--line-strong);">
+        <span style="font-size:12.5px; font-weight:600;">${selection.length} job${selection.length === 1 ? "" : "s"} selected</span>
+        ${triageQueue.length ? `<button class="btn-ghost-small" id="boardSelectTriageBtn">Select all in Needs triage (${triageQueue.length})</button>` : ""}
+        <button class="btn-ghost-small" id="boardSelectAllBtn">Select all visible</button>
+        <button class="btn-ghost-small" id="boardSelectNoneBtn">Clear</button>
+        <button class="btn-primary" id="boardDeleteSelectedBtn" ${selection.length ? "" : "disabled"} style="margin-left:auto; background:var(--bad); border-color:var(--bad);">🗑 Delete selected</button>
+      </div>
+      <p style="color:var(--ink-faint); font-size:11.5px; margin:-10px 0 16px;">A testing utility — e.g. clearing out a bad or duplicate import to re-run it. Deletes the job and any task lines on it. Can't be undone.</p>` : ""}
       ${triageQueue.length ? `
       <div class="panel" style="margin-bottom:18px; border-color:var(--warn-strong); background:var(--warn-soft);">
         <h2 style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">Needs triage <span class="badge warn">${triageQueue.length}</span></h2>
         <p style="color:var(--ink-soft); font-size:12.5px; margin:0 0 12px;">Task lines came in from BC's generic list — pick what applies before these jobs show up on the board below.</p>
         <div style="display:flex; flex-direction:column; gap:8px;">
           ${triageQueue.map(j => `
-            <button class="card handover-row" data-open-triage="${j.id}">
-              <div>
+            <div class="card handover-row" style="display:flex; align-items:center; gap:10px; ${selectMode ? "" : "cursor:pointer;"}" ${selectMode ? "" : `data-open-triage="${j.id}"`}>
+              ${selectMode ? `<input type="checkbox" data-job-select="${j.id}" ${selection.includes(j.id) ? "checked" : ""} style="width:auto; flex:none;">` : ""}
+              <div style="flex:1; ${selectMode ? "" : ""}" ${selectMode ? `data-open-triage="${j.id}"` : ""}>
                 <div class="job-title">${j.jobNumber} · ${j.name}${j.customer ? ` — ${j.customer}` : ""}</div>
                 <div class="job-meta">${j.candidateTasks.length} candidate task line${j.candidateTasks.length === 1 ? "" : "s"} to review</div>
               </div>
               <div class="handover-right"><span class="badge warn">Review →</span></div>
-            </button>`).join("")}
+            </div>`).join("")}
         </div>
       </div>` : ""}
       <div class="toolbar">
@@ -2289,7 +2401,7 @@
           <div class="board-col" data-stage-col="${escapeAttr(stage)}">
             <div class="board-col-head"><span class="name">${stage}</span><span class="count">${colJobs.length}</span></div>
             <div class="board-cards">
-              ${colJobs.map(j => boardCardHtml(j)).join("")}
+              ${colJobs.map(j => boardCardHtml(j, selectMode, selection)).join("")}
             </div>
           </div>`;
         }).join("")}
@@ -2297,15 +2409,16 @@
     `;
   }
 
-  function boardCardHtml(job) {
+  function boardCardHtml(job, selectMode, selection) {
     const daysToDue = job.requiredDeliveryDate ? Math.ceil((job.requiredDeliveryDate - Date.now()) / DAY) : null;
     const dueClass = daysToDue == null ? "" : daysToDue < 0 || daysToDue <= 3 ? "red" : daysToDue <= 7 ? "amber" : "";
     const owner = userById(job.ownerId);
     const coordinator = userById(job.coordinatorId);
     return `
-    <div class="board-card" draggable="true" data-job-card="${job.id}" data-open-job="${job.id}">
+    <div class="board-card" draggable="${!selectMode}" data-job-card="${job.id}" ${selectMode ? "" : `data-open-job="${job.id}"`}>
       <div class="bc-top">
-        <div>
+        ${selectMode ? `<input type="checkbox" data-job-select="${job.id}" ${(selection || []).includes(job.id) ? "checked" : ""} style="width:auto; margin-top:2px;">` : ""}
+        <div style="flex:1;" ${selectMode ? `data-open-job="${job.id}"` : ""}>
           <div class="bc-num">${job.jobNumber}</div>
           <div class="bc-name">${job.name}</div>
           <div class="bc-customer">${job.customer || ""}</div>
@@ -2619,7 +2732,8 @@
           <li style="margin-bottom:8px;"><b>Anyone doing task work</b> — My Dashboard is the whole job: your open items, drag the slider, done.</li>
           <li style="margin-bottom:8px;"><b>Manager</b> — WIP Meeting for the daily "what's the state of the floor" view, Analytics for trends (forecast, why dates keep moving, idle time), Team for workload across your reports.</li>
           <li style="margin-bottom:8px;"><b>Everyone</b> — All Actions is the one list of literally everything, production and non-production alike, filterable and sortable.</li>
-          <li><b>Team leader going on leave?</b> A manager can hand their coverage to someone else — themselves, another team leader, or an employee stepping up — from the "Delegated coverage" panel on Team. Their open tasks, actions and owned jobs show up on the covering person's dashboard immediately (tagged "Covering for…") and disappear from it the moment the delegation ends — nothing to reassign by hand. The original leader keeps their own access throughout.</li>
+          <li style="margin-bottom:8px;"><b>Team leader going on leave?</b> A manager can hand their coverage to someone else — themselves, another team leader, or an employee stepping up — from the "Delegated coverage" panel on Team. Their open tasks, actions and owned jobs show up on the covering person's dashboard immediately (tagged "Covering for…") and disappear from it the moment the delegation ends — nothing to reassign by hand. The original leader keeps their own access throughout.</li>
+          <li><b>Admin</b> is a permission, not a role — it's a checkbox on a person (Employees), not something anyone's whole job is. Whoever holds it can add/edit employees, reassign managers, set a defined role, and grant Admin to others. Priya holds it by default in the sample data.</li>
         </ul>
       </div>
 
@@ -2627,20 +2741,21 @@
         <h2>Views at a glance</h2>
         <ul style="margin:0; padding-left:18px; color:var(--ink-soft);">
           <li style="margin-bottom:6px;"><b>My Dashboard</b> — your open work, and jobs about to hand over to you next.</li>
-          <li style="margin-bottom:6px;"><b>Job Board</b> — every job, every stage, drag-and-drop. The "where does everything stand" view.</li>
+          <li style="margin-bottom:6px;"><b>Job Board</b> — every job, every stage, drag-and-drop. The "where does everything stand" view. Open a job and expand "Job lifetime" for the path it's taken — time in each stage, plus any time logged on hold.</li>
           <li style="margin-bottom:6px;"><b>Team</b> — visible if you manage people or lead a workshop pool.</li>
           <li style="margin-bottom:6px;"><b>WIP Meeting</b> — jobs actually in Production right now, current task and risk per job.</li>
           <li style="margin-bottom:6px;"><b>All Actions</b> — everything, one filterable table.</li>
           <li style="margin-bottom:6px;"><b>Analytics</b> — production forecast, due-date-change reasons, idle time.</li>
-          <li><b>Employees</b> — the staff list feeding every assignment dropdown in the tool.</li>
+          <li><b>Employees</b> — the staff list feeding every assignment dropdown in the tool, list or org chart. Editing needs Admin; anyone else gets a read-only view.</li>
         </ul>
       </div>
 
       <div class="panel">
         <h2>A few things to know while you're testing</h2>
         <ul style="margin:0; padding-left:18px; color:var(--ink-soft);">
-          <li style="margin-bottom:6px;">Pick yourself in <b>"Viewing as"</b> at the bottom of the sidebar, so what you see matches what you'd actually see day to day. Not listed? Add yourself under Employees first.</li>
+          <li style="margin-bottom:6px;">Pick yourself in <b>"Viewing as"</b> at the bottom of the sidebar, so what you see matches what you'd actually see day to day. Not listed? Add yourself under Employees first — you'll need Priya (or another Admin) selected to do that.</li>
           <li style="margin-bottom:6px;">Your data is private to this browser — nothing you do here affects what anyone else testing this sees.</li>
+          <li style="margin-bottom:6px;">Made a mess importing? As an Admin, use <b>"☑ Select jobs"</b> on the Job Board to bulk-delete a bad or duplicate import (there's a shortcut to select everything sitting in Needs Triage) instead of clicking through jobs one at a time, then re-import.</li>
           <li style="margin-bottom:6px;">Made a mess? <b>"↺ Reset"</b> at the bottom of the sidebar wipes it back to a clean slate.</li>
           <li>This round is testing whether the tool's structure and workflow make sense — not final visual polish. Tell us what's missing or wrong, not just what looks off.</li>
         </ul>
@@ -2649,16 +2764,57 @@
   }
 
   /* ---- Employees ---- */
+  // Add/edit/delete an employee, reassign a manager, set a defined role, or grant Admin
+  // are all Admin-only — everyone else gets a read-only view of the same information.
+  // Admin is a permission level, not a role of its own (see the project plan's Roles
+  // sheet): it's a checkbox on a person, applied on top of whatever role they hold.
   function renderEmployees() {
+    const admin = isAdmin(state.currentUserId);
     return `
       <div class="view-header">
-        <div><h1>Employees</h1><p class="lede">Manage the staff list used across the register</p></div>
+        <div><h1>Employees</h1><p class="lede">${admin ? "Manage the staff list used across the register" : "The staff list used across the register."}</p></div>
         ${newActionButton()}
       </div>
+      ${!admin ? `
+      <div class="panel" style="padding:11px 15px; margin-bottom:16px; background:var(--neutral-soft); border-color:var(--line-strong);">
+        <span style="font-size:12.5px; color:var(--ink-soft);">🔒 Read-only — adding/editing employees, reassigning managers, and setting roles or Admin needs the Admin permission. Ask whoever holds it to make a change.</span>
+      </div>` : ""}
       <div class="panel">
-        <h2>Employees</h2>
-        <p style="color:var(--ink-faint); font-size:12.5px; margin:0 0 16px;">Add your staff here — this list feeds the "assigned to" and "manager" dropdowns everywhere else. In production this syncs from your organization's SharePoint / Microsoft Entra ID directory via SSO instead of being maintained by hand. Welding Workshop trades (welders, boilermakers) aren't listed individually here — see Team → capacity for that pool.</p>
-        <div class="emp-col-head"><span>Name</span><span>Manager</span><span>Department</span><span>Role</span><span class="emp-spacer"></span></div>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:12px;">
+          <h2 style="margin:0;">Employees</h2>
+          <div class="filter-toggle">
+            <button data-emp-view="list" aria-pressed="${state.employeesView === "list"}">List</button>
+            <button data-emp-view="chart" aria-pressed="${state.employeesView === "chart"}">Org chart</button>
+          </div>
+        </div>
+        <p style="color:var(--ink-faint); font-size:12.5px; margin:0 0 16px;">${admin ? "Add your staff here — this list feeds the \"assigned to\" and \"manager\" dropdowns everywhere else." : "This list feeds the \"assigned to\" and \"manager\" dropdowns everywhere else in the tool."} In production this syncs from your organization's SharePoint / Microsoft Entra ID directory via SSO instead of being maintained by hand. Welding Workshop trades (welders, boilermakers) aren't listed individually here — see Team → capacity for that pool.</p>
+        ${state.employeesView === "chart" ? renderOrgChart() : renderEmployeesList(admin)}
+      </div>
+      ${renderEquipmentPanel()}
+    `;
+  }
+
+  function renderEmployeesList(admin) {
+    if (!admin) {
+      return `
+        <div class="emp-col-head"><span>Name</span><span>Manager</span><span>Department</span><span>Job Title</span><span>Role</span><span style="flex:none; width:52px; text-align:center;">Admin</span></div>
+        <div class="emp-list">
+          ${state.users.map(u => `
+            <div>
+              <div class="emp-row" style="background:var(--surface);">
+                <span style="flex:1; font-weight:600;">${escapeAttr(u.name)}</span>
+                <span style="flex:1; color:var(--ink-soft);">${u.managerId ? escapeAttr((userById(u.managerId) || {}).name || "—") : "— None —"}</span>
+                <span style="flex:1; color:var(--ink-soft);">${escapeAttr(u.department || "—")}</span>
+                <span style="flex:1; color:var(--ink-soft);">${escapeAttr(u.jobTitle || "—")}</span>
+                <span style="flex:1; color:var(--ink-soft);">${u.roleType ? escapeAttr(u.roleType) : "— Not set —"}</span>
+                <span style="flex:none; width:52px; text-align:center;">${u.isAdmin ? "✓" : ""}</span>
+              </div>
+              ${u.capabilities ? `<div class="desc-notes" style="padding:4px 2px 0 12px;">Capabilities: ${u.capabilities.join(", ")}</div>` : ""}
+            </div>`).join("")}
+        </div>`;
+    }
+    return `
+      <div class="emp-col-head"><span>Name</span><span>Manager</span><span>Department</span><span>Job Title</span><span>Role</span><span style="flex:none; width:52px; text-align:center;">Admin</span><span class="emp-spacer"></span></div>
         <div class="emp-list">
           ${state.users.map(u => `
             <div>
@@ -2670,15 +2826,46 @@
                 </select>
                 <input type="text" value="${escapeAttr(u.department)}" data-emp-field="department" data-emp-id="${u.id}">
                 <input type="text" value="${escapeAttr(u.jobTitle)}" data-emp-field="jobTitle" data-emp-id="${u.id}">
+                <select data-emp-field="roleType" data-emp-id="${u.id}">
+                  <option value="" ${!u.roleType ? "selected" : ""}>— Not set —</option>
+                  ${ROLE_OPTIONS.map(r => `<option value="${r}" ${u.roleType === r ? "selected" : ""}>${r}</option>`).join("")}
+                </select>
+                <input type="checkbox" data-emp-admin="${u.id}" ${u.isAdmin ? "checked" : ""} style="flex:none; width:20px; height:20px;" title="Admin permission">
                 <button class="icon-btn" data-delete-emp="${u.id}" title="Remove">✕</button>
               </div>
               ${u.capabilities ? `<div class="desc-notes" style="padding:4px 2px 0 12px;">Capabilities: ${u.capabilities.join(", ")}</div>` : ""}
             </div>`).join("")}
         </div>
-        <button class="btn-secondary" id="addEmployeeBtn" style="margin-top:14px;">+ Add employee</button>
-      </div>
-      ${renderEquipmentPanel()}
-    `;
+        <button class="btn-secondary" id="addEmployeeBtn" style="margin-top:14px;">+ Add employee</button>`;
+  }
+
+  // Recursive by managerId — a person with no manager (or whose manager somehow isn't
+  // in the list) is a root. visited guards against a bad managerId loop ever hanging
+  // the page instead of just rendering an odd tree.
+  function renderOrgChart() {
+    const visited = new Set();
+    function node(u, depth) {
+      if (visited.has(u.id)) return "";
+      visited.add(u.id);
+      const reports = directReports(u.id);
+      return `
+        <div style="${depth ? "margin-left:26px; padding-left:14px; border-left:2px solid var(--line); margin-top:8px;" : ""}">
+          <div class="card" style="display:flex; align-items:center; gap:10px; padding:9px 12px;">
+            <div style="flex:1; min-width:0;">
+              <div style="font-weight:700; font-size:13px; display:flex; align-items:center; gap:6px;">
+                ${escapeAttr(u.name)}
+                ${u.isAdmin ? `<span class="badge" style="background:var(--accent-soft); color:var(--accent-hover); font-size:10px;">Admin</span>` : ""}
+              </div>
+              <div style="color:var(--ink-faint); font-size:12px;">${escapeAttr(u.jobTitle || "—")}${u.department ? ` · ${escapeAttr(u.department)}` : ""}</div>
+            </div>
+            ${u.roleType ? `<span class="badge" style="background:var(--neutral-soft); color:var(--ink-soft); font-size:10.5px; flex:none;">${u.roleType}</span>` : ""}
+          </div>
+          ${reports.map(r => node(r, depth + 1)).join("")}
+        </div>`;
+    }
+    const roots = state.users.filter(u => !u.managerId || !userById(u.managerId));
+    if (!roots.length) return `<div class="empty-note">No employees yet.</div>`;
+    return `<div>${roots.map(u => node(u, 0)).join("")}</div>`;
   }
 
   /* ---- Job modal (production) ---- */
@@ -2716,6 +2903,45 @@
           ${rows.map(([label, val]) => `<div><div style="font-size:11px; color:var(--ink-faint);">${label}</div><div style="font-weight:600; font-size:13px;">${escapeAttr(String(val))}</div></div>`).join("")}
         </div>
       </div>`;
+  }
+
+  // "The path a job took" — a proportional timeline bar across every stage it's been
+  // through (plus its current, still-open stage), a per-stage day count underneath, and
+  // — separately, since it isn't the same thing — how much of that time was logged as
+  // sitting on hold. Collapsed behind a details/summary since it's supporting detail,
+  // not something you need on every glance at a job.
+  function renderJobLifetimePanel(job) {
+    const segments = jobStageSegments(job);
+    const totalDays = segments.reduce((s, seg) => s + seg.days, 0);
+    const holds = jobHoldSegments(job);
+    const idleDays = jobTotalIdleDays(job);
+    return `
+      <details class="panel" style="padding:14px 16px;">
+        <summary style="cursor:pointer; font-size:13px; font-weight:700; list-style:none; display:flex; align-items:center; justify-content:space-between;">
+          <span>Job lifetime — the path this job has taken</span>
+          <span style="font-weight:600; color:var(--ink-faint); font-size:12px;">${Math.round(totalDays)}d total${idleDays > 0.5 ? ` · ${Math.round(idleDays)}d idle` : ""}</span>
+        </summary>
+        <div style="margin-top:12px;">
+          <div style="display:flex; height:14px; border-radius:7px; overflow:hidden; border:1px solid var(--line-strong);">
+            ${segments.map(seg => `<div style="flex:${Math.max(seg.days, 0.15)} 0 0; background:${stageColor(seg.stage)}; ${seg.exitedAt === null ? "background-image:repeating-linear-gradient(135deg, rgba(255,255,255,.35) 0 6px, transparent 6px 12px);" : ""}" title="${seg.stage} — ${seg.days.toFixed(1)}d${seg.exitedAt === null ? " (current)" : ""}"></div>`).join("")}
+          </div>
+          <div style="display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:10px;">
+            ${segments.map(seg => `
+              <div style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-soft);">
+                <span style="width:9px; height:9px; border-radius:2px; background:${stageColor(seg.stage)}; flex:none;"></span>
+                ${seg.stage}${seg.exitedAt === null ? " <b>(current)</b>" : ""} — <b>${seg.days.toFixed(1)}d</b>
+              </div>`).join("")}
+          </div>
+          ${holds.length ? `
+          <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--line);">
+            <div style="font-size:12px; font-weight:700; color:var(--warn); margin-bottom:6px;">⏸ Idle / on-hold periods — ${idleDays.toFixed(1)}d total</div>
+            <div style="display:flex; flex-direction:column; gap:5px;">
+              ${holds.map(h => `<div style="font-size:12px; color:var(--ink-soft);"><b>${h.category}</b> — ${h.days.toFixed(1)}d${h.endedAt === null ? ` <span style="color:var(--warn); font-weight:600;">(ongoing)</span>` : ""}${h.reason ? `: ${escapeAttr(h.reason)}` : ""}</div>`).join("")}
+            </div>
+          </div>` : ""}
+          <p style="color:var(--ink-faint); font-size:11.5px; margin:12px 0 0;">Stage time starts counting the moment this feature shipped for jobs already in flight — history before that isn't reconstructed. New jobs and every stage move from here on are tracked in full.</p>
+        </div>
+      </details>`;
   }
 
   function renderJobModalHtml(jobId) {
@@ -2785,6 +3011,7 @@
               </div>
             </div>
             ${renderBcReferencePanel(job)}
+            ${renderJobLifetimePanel(job)}
             ${job.stage === "Production" && tasks.length > 0 && tasks.every(t => t.status === "COMPLETE") ? `
             <div class="panel" style="padding:12px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; background:var(--good-soft); border-color:var(--good-strong);">
               <span style="font-size:12.5px; color:var(--good); font-weight:600;">✓ All task lines are complete — ready to move this job on?</span>
@@ -3340,6 +3567,31 @@
     if (quickChip) { const q = quickChip.dataset.quick; state.register.quick = state.register.quick === q ? "" : q; render(); return; }
 
     if (e.target.id === "boardHoldChip") { state.boardFilter.holdOnly = !state.boardFilter.holdOnly; render(); return; }
+
+    if (e.target.id === "boardSelectModeBtn") {
+      state.boardSelectMode = !state.boardSelectMode;
+      state.boardSelection = [];
+      render(); return;
+    }
+    if (e.target.id === "boardSelectAllBtn") {
+      state.boardSelection = [...new Set(state.jobs.filter(j => !j.needsTriage).map(j => j.id))];
+      render(); return;
+    }
+    if (e.target.id === "boardSelectTriageBtn") {
+      state.boardSelection = [...new Set([...state.boardSelection, ...jobsNeedingTriage().map(j => j.id)])];
+      render(); return;
+    }
+    if (e.target.id === "boardSelectNoneBtn") { state.boardSelection = []; render(); return; }
+    if (e.target.id === "boardDeleteSelectedBtn") {
+      const ids = state.boardSelection;
+      if (!ids.length) return;
+      askConfirm(`Delete ${ids.length} job${ids.length === 1 ? "" : "s"} and all their task lines? This can't be undone.`, () => {
+        deleteJobs(ids);
+        state.boardSelectMode = false;
+      });
+      return;
+    }
+
     const stageStepBtn = e.target.closest("[data-set-stage]");
     if (stageStepBtn) { setJobStage(stageStepBtn.dataset.setStage, stageStepBtn.dataset.stageValue); render(); return; }
 
@@ -3476,9 +3728,11 @@
       render(); return;
     }
     if (e.target.id === "addEmployeeBtn") {
-      state.users.push({ id: uid("u"), name: "New employee", jobTitle: "", department: "", managerId: null });
+      state.users.push({ id: uid("u"), name: "New employee", jobTitle: "", department: "", managerId: null, roleType: null, isAdmin: false });
       render(); return;
     }
+    const empViewBtn = e.target.closest("[data-emp-view]");
+    if (empViewBtn) { state.employeesView = empViewBtn.dataset.empView; render(); return; }
 
     if (e.target.id === "confirmCancelBtn") { state.confirmDraft = null; render(); return; }
     if (e.target.id === "confirmOkBtn") {
@@ -3528,7 +3782,7 @@
         priority: document.getElementById("nj_priority").value,
         requiredDeliveryDate, internalTargetDate: requiredDeliveryDate, dueDate: requiredDeliveryDate,
         status: "ACTIVE", stage: "Order Received", stageEnteredAt: new Date(),
-        coordinatorId, ownerId: coordinatorId, onHold: false,
+        coordinatorId, ownerId: coordinatorId, onHold: false, stageHistory: [], holdHistory: [],
       });
       state.dataSource = "imported"; state.importedAt = state.importedAt || new Date();
       state.newJobOpen = false; state.newJobDraft = null;
@@ -3597,6 +3851,11 @@
       state.triageSelected = e.target.checked ? [...state.triageSelected, ref] : state.triageSelected.filter(r => r !== ref);
       render(); return;
     }
+    if (e.target.matches("input[data-job-select]")) {
+      const id = e.target.dataset.jobSelect;
+      state.boardSelection = e.target.checked ? [...new Set([...state.boardSelection, id])] : state.boardSelection.filter(x => x !== id);
+      render(); return;
+    }
     if (e.target.matches("input[data-hold-reason]")) { setJobField(e.target.dataset.holdReason, "holdReason", e.target.value); return; }
     if (e.target.id === "regStatus") { state.register.status = e.target.value; render(); return; }
     if (e.target.id === "regAssignee") { state.register.assignee = e.target.value; render(); return; }
@@ -3605,6 +3864,17 @@
     if (empField) {
       const u = userById(empField.dataset.empId);
       if (u) u[empField.dataset.empField] = empField.value || (empField.dataset.empField === "managerId" ? null : "");
+      render(); return;
+    }
+    if (e.target.matches("input[data-emp-admin]")) {
+      const u = userById(e.target.dataset.empAdmin);
+      // Never let the directory end up with zero Admins from in here — the last one
+      // has to hand it to someone else first, not just uncheck themselves into a corner.
+      if (u && !e.target.checked && u.isAdmin && state.users.filter(x => x.isAdmin).length <= 1) {
+        askConfirm("This is the only Admin left — grant it to someone else before removing it here.", () => {});
+        render(); return;
+      }
+      if (u) u.isAdmin = e.target.checked;
       render(); return;
     }
   });
