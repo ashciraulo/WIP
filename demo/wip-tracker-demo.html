@@ -912,6 +912,16 @@
       // Never let a migration from before Admin existed leave nobody able to edit the
       // employee directory — fall back to Priya (or the first user) as Admin.
       if (!base.users.some(u => u.isAdmin)) { const fallback = base.users.find(u => u.id === "u_priya") || base.users[0]; if (fallback) fallback.isAdmin = true; }
+      // Self-heal a browser that already has orphaned history from before deleteJobs()
+      // cascaded to dueDateChanges/idleGaps too — an unguarded orphaned reference (a
+      // deleted job/task an idle gap or change log entry still points at) crashed
+      // Analytics outright rather than just rendering oddly, so this can't wait for
+      // someone to notice and hit Reset.
+      const validJobIds = new Set(base.jobs.map(j => j.id));
+      const validTaskIds = new Set(base.tasks.map(t => t.id));
+      base.idleGaps = base.idleGaps.filter(g => validJobIds.has(g.jobId) && (!g.fromTaskId || validTaskIds.has(g.fromTaskId)) && (!g.toTaskId || validTaskIds.has(g.toTaskId)));
+      base.dueDateChanges = base.dueDateChanges.filter(c => validTaskIds.has(c.taskId));
+      base.pendingUpdates = base.pendingUpdates.filter(p => validTaskIds.has(p.taskId));
       if (saved.actions) base.actions = saved.actions;
       if (saved.robotEquipment) base.robotEquipment = saved.robotEquipment;
       if (saved.currentUserId && base.users.some(u => u.id === saved.currentUserId)) base.currentUserId = saved.currentUserId;
@@ -1133,13 +1143,19 @@
   function stageColor(stage) { const i = STAGES.indexOf(stage); return STAGE_COLORS[i] ?? "#c9d6df"; }
 
   // Bulk delete: a testing utility for clearing out a bad/duplicate import in one shot,
-  // rather than clicking through jobs one at a time. Cascades to that job's task lines
-  // (and any pending approvals riding on them) so nothing orphaned is left behind.
+  // rather than clicking through jobs one at a time. Cascades to that job's task lines,
+  // any pending approvals riding on them, and its due-date-change/idle-gap history —
+  // an orphaned reference in either of those crashed Analytics outright (rendered a
+  // deleted job's number/name with nothing to guard a null lookup), which is a much
+  // worse failure than the history entry just disappearing along with the job it was
+  // logged against.
   function deleteJobs(jobIds) {
     const idSet = new Set(jobIds);
     const doomedTaskIds = new Set(state.tasks.filter(t => idSet.has(t.jobId)).map(t => t.id));
     state.tasks = state.tasks.filter(t => !idSet.has(t.jobId));
     state.pendingUpdates = state.pendingUpdates.filter(p => !doomedTaskIds.has(p.taskId));
+    state.dueDateChanges = state.dueDateChanges.filter(c => !doomedTaskIds.has(c.taskId));
+    state.idleGaps = state.idleGaps.filter(g => !idSet.has(g.jobId) && !doomedTaskIds.has(g.fromTaskId) && !doomedTaskIds.has(g.toTaskId));
     state.jobs = state.jobs.filter(j => !idSet.has(j.id));
     state.boardSelection = (state.boardSelection || []).filter(id => !idSet.has(id));
   }
@@ -1590,6 +1606,9 @@
     if (!t) return;
     state.tasks = state.tasks.filter(x => x.id !== taskId);
     tasksForJob(t.jobId).forEach((x, i) => { x.sequence = i + 1; }); // keep "Task N" contiguous
+    state.pendingUpdates = state.pendingUpdates.filter(p => p.taskId !== taskId);
+    state.dueDateChanges = state.dueDateChanges.filter(c => c.taskId !== taskId);
+    state.idleGaps = state.idleGaps.filter(g => g.fromTaskId !== taskId && g.toTaskId !== taskId);
   }
   // Drag-and-drop reorder: drop the dragged line immediately before the drop target,
   // then renumber everyone in between — same "keep sequence contiguous" rule as delete.
@@ -1697,7 +1716,10 @@
       done: a.status === "Completed" || a.status === "Closed", coveringFor: coveringFor || null,
     };
   }
-  function allRows() { return [...state.tasks.map(taskToRow), ...state.actions.map(actionToRow)]; }
+  // A task whose job is gone shouldn't be able to reach here in the first place
+  // (deleteJobs/deleteTaskLine keep the two in lockstep) — filtered anyway since
+  // taskToRow reads straight off job.id/job.jobNumber with no null guard.
+  function allRows() { return [...state.tasks.filter(t => jobById(t.jobId)).map(taskToRow), ...state.actions.map(actionToRow)]; }
   function rowAssigneeDisplay(row) {
     if (row.type === "task") return taskAssigneeDisplay(row.raw);
     const u = userById(row.assignedUserId);
@@ -1857,7 +1879,10 @@
   }
   function getIdleAnalytics(days) {
     const since = Date.now() - days * DAY;
-    const gaps = state.idleGaps.filter(g => g.idleStart.getTime() >= since).sort((a, b) => b.idleStart - a.idleStart);
+    // jobById(g.jobId) is rendered unguarded further down, so an orphaned gap (its job
+    // deleted, somehow not already caught at the source) belongs out of this list, not
+    // crashing whoever renders it.
+    const gaps = state.idleGaps.filter(g => g.idleStart.getTime() >= since && jobById(g.jobId)).sort((a, b) => b.idleStart - a.idleStart);
     const closed = gaps.filter(g => g.durationMins != null);
     const totalMins = closed.reduce((s, g) => s + g.durationMins, 0);
     return { gaps, openCount: gaps.length - closed.length, avgMins: closed.length ? Math.round(totalMins / closed.length) : 0, totalMins };
@@ -1944,32 +1969,56 @@
     // modal: a freshly-rendered <details> defaults closed, so without this, opening it
     // and then touching anything else on the modal would silently collapse it again.
     const openDetailsIdx = oldModalBody ? [...oldModalBody.querySelectorAll("details")].reduce((acc, d, i) => (d.open && acc.push(i), acc), []) : [];
-    renderRailNav();
-    renderViewerSelect();
-    renderRailFooter();
+    // Each independently guarded: a bad reference breaking the nav bar used to take
+    // the whole app down with it (every future click ran into the same throw before
+    // ever reaching the view content below) — isolate the failure to whichever piece
+    // actually broke instead.
+    try { renderRailNav(); } catch (err) { console.error("Nav render failed:", err); }
+    try { renderViewerSelect(); } catch (err) { console.error("Viewer select render failed:", err); }
+    try { renderRailFooter(); } catch (err) { console.error("Rail footer render failed:", err); }
     const el = document.getElementById("view");
-    if (state.view === "me") el.innerHTML = renderMe();
-    else if (state.view === "board") el.innerHTML = renderJobBoard();
-    else if (state.view === "manager") el.innerHTML = renderManager();
-    else if (state.view === "wip") el.innerHTML = renderWip();
-    else if (state.view === "register") el.innerHTML = renderRegister();
-    else if (state.view === "analytics") el.innerHTML = renderAnalytics();
-    else if (state.view === "employees") el.innerHTML = renderEmployees();
-    else if (state.view === "guide") el.innerHTML = renderGuide();
-    renderModal();
-    if (modalScroll != null) {
-      const newModalBody = document.querySelector(".modal-body");
-      if (newModalBody) {
-        newModalBody.scrollTop = modalScroll;
-        const newDetails = newModalBody.querySelectorAll("details");
-        openDetailsIdx.forEach(i => { if (newDetails[i]) newDetails[i].open = true; });
-      }
+    // A view that throws mid-render used to leave whatever was already in #view up on
+    // screen with no indication anything went wrong — clicking its nav item looked
+    // exactly like nothing happened, which is exactly how a real bug here (an
+    // unguarded null lookup on an orphaned record) actually presented. Surface it
+    // instead of swallowing it, however this class of bug reappears.
+    try {
+      if (state.view === "me") el.innerHTML = renderMe();
+      else if (state.view === "board") el.innerHTML = renderJobBoard();
+      else if (state.view === "manager") el.innerHTML = renderManager();
+      else if (state.view === "wip") el.innerHTML = renderWip();
+      else if (state.view === "register") el.innerHTML = renderRegister();
+      else if (state.view === "analytics") el.innerHTML = renderAnalytics();
+      else if (state.view === "employees") el.innerHTML = renderEmployees();
+      else if (state.view === "guide") el.innerHTML = renderGuide();
+    } catch (err) {
+      console.error("View render failed:", err);
+      el.innerHTML = `
+        <div class="panel" style="border-color:var(--bad); background:var(--bad-soft);">
+          <h2 style="color:var(--bad); margin-bottom:6px;">This view hit an error and couldn't render</h2>
+          <p style="color:var(--ink-soft); font-size:13px; margin:0 0 8px;">${escapeAttr(err.message)}</p>
+          <p style="color:var(--ink-faint); font-size:12px; margin:0;">Try "↺ Reset" in the sidebar if this keeps happening — screenshot this message first if you're reporting it.</p>
+        </div>`;
     }
-    wireSliders();
-    wireBoardDragDrop();
-    wireTaskLineDragDrop();
-    wireOrgChartDragDrop();
-    wireTaskLineForm();
+    try {
+      renderModal();
+      if (modalScroll != null) {
+        const newModalBody = document.querySelector(".modal-body");
+        if (newModalBody) {
+          newModalBody.scrollTop = modalScroll;
+          const newDetails = newModalBody.querySelectorAll("details");
+          openDetailsIdx.forEach(i => { if (newDetails[i]) newDetails[i].open = true; });
+        }
+      }
+    } catch (err) { console.error("Modal render failed:", err); }
+    // Each wiring step guarded individually too, same reasoning as the nav pieces
+    // above — and saveState() runs no matter what else on this pass failed, since
+    // whatever triggered this render() may have already changed state worth keeping.
+    try { wireSliders(); } catch (err) { console.error("wireSliders failed:", err); }
+    try { wireBoardDragDrop(); } catch (err) { console.error("wireBoardDragDrop failed:", err); }
+    try { wireTaskLineDragDrop(); } catch (err) { console.error("wireTaskLineDragDrop failed:", err); }
+    try { wireOrgChartDragDrop(); } catch (err) { console.error("wireOrgChartDragDrop failed:", err); }
+    try { wireTaskLineForm(); } catch (err) { console.error("wireTaskLineForm failed:", err); }
     saveState();
   }
   function renderRailFooter() {
@@ -2822,7 +2871,7 @@
         <h2>Views at a glance</h2>
         <ul style="margin:0; padding-left:18px; color:var(--ink-soft);">
           <li style="margin-bottom:6px;"><b>My Dashboard</b> — your open work, and jobs about to hand over to you next.</li>
-          <li style="margin-bottom:6px;"><b>Job Board</b> — every job, every stage, drag-and-drop. The "where does everything stand" view. Open a job and expand "Job lifetime" for the path it's taken — time in each stage, plus any time logged on hold. On a Production job, hover the gap above or below any task line for a "+" to insert one exactly there, or drag a line's ⠿ handle to reorder it.</li>
+          <li style="margin-bottom:6px;"><b>Job Board</b> — every job, every stage, drag-and-drop. The "where does everything stand" view. Open a job and expand "Job lifetime" for the path it's taken — time in each stage, plus any time logged on hold. Hover the gap above or below any task line for a "+" to insert one exactly there, or drag a line's ⠿ handle to reorder it — works at any stage, including right after triage, before the job's even reached Production.</li>
           <li style="margin-bottom:6px;"><b>Team</b> — visible if you manage people or lead a workshop pool.</li>
           <li style="margin-bottom:6px;"><b>WIP Meeting</b> — jobs actually in Production right now, current task and risk per job.</li>
           <li style="margin-bottom:6px;"><b>All Actions</b> — everything, one filterable table.</li>
@@ -3113,17 +3162,16 @@
               <span style="font-size:12.5px; color:var(--good); font-weight:600;">✓ All task lines are complete — ready to move this job on?</span>
               <button class="btn-small" data-set-stage="${job.id}" data-stage-value="NDT / Testing">Advance to NDT / Testing →</button>
             </div>` : ""}
-            ${job.stage === "Production"
-              ? tasks.map((task, i) => renderTaskDivider(job, i, false) + renderTaskLine(task, true)).join("") + renderTaskDivider(job, tasks.length, true)
-              : `${tasks.map(task => renderTaskLine(task)).join("")}${tasks.length === 0 ? `<div class="empty-note">No production task lines yet — this job hasn't reached the Production stage.</div>` : ""}`}
+            ${tasks.map((task, i) => renderTaskDivider(job, i, false) + renderTaskLine(task, true)).join("") + renderTaskDivider(job, tasks.length, true)}
           </div>
           <div class="modal-foot"><button class="btn-primary" id="modalSaveBtn">Save &amp; close</button></div>
         </div>
       </div>`;
   }
 
-  // reorderable: only while the job is in Production, where task lines can actually be
-  // added/re-sequenced — drag handle stays out of the way everywhere else.
+  // reorderable defaults false so any future read-only rendering of a task line (e.g.
+  // a summary elsewhere) doesn't pick up a drag handle it can't act on — the job modal,
+  // the only place this renders today, always passes true.
   function renderTaskLine(task, reorderable = false) {
     const risk = assessTaskRisk(task);
     const who = taskAssigneeDisplay(task);
@@ -3209,10 +3257,12 @@
       </div>`;
   }
 
-  // The one place a coordinator/team leader breaks a job into task lines — only
-  // offered once a job reaches Production. Equipment for a robotics task isn't
-  // picked here; it starts unassigned and gets set via the existing reassign
-  // controls on the line once it exists, same as reassigning any other task.
+  // The one place a coordinator/team leader breaks a job into task lines. Not gated to
+  // the Production stage — triage can hand a job real task lines the moment it's
+  // imported, well before it physically reaches the floor, so this needs to work at
+  // any stage. Equipment for a robotics task isn't picked here; it starts unassigned
+  // and gets set via the existing reassign controls on the line once it exists, same
+  // as reassigning any other task.
   //
   // Rendered as a divider between every pair of task lines (and before the first /
   // after the last) rather than one button at the bottom — hover any gap to insert a
