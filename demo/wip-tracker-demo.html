@@ -1013,6 +1013,23 @@
   function actionById(id) { return state.actions.find(a => a.id === id) || null; }
   function isManager(userId) { return state.users.some(u => u.managerId === userId); }
   function directReports(managerId) { return state.users.filter(u => u.managerId === managerId); }
+  // Everyone under a person, not just direct reports — a skip-level manager needs to
+  // see trouble anywhere down the chain (an overdue task three levels down doesn't
+  // stop being their problem just because it isn't their direct report's own task).
+  // Cycle-guarded the same way the org chart's descendant check is.
+  function allReportsRecursive(managerId) {
+    const out = [];
+    const seen = new Set();
+    const queue = [...directReports(managerId)];
+    while (queue.length) {
+      const person = queue.shift();
+      if (seen.has(person.id)) continue;
+      seen.add(person.id);
+      out.push(person);
+      queue.push(...directReports(person.id));
+    }
+    return out;
+  }
   function equipmentById(id) { return state.robotEquipment.find(e => e.id === id) || null; }
 
   /* ---- Delegation: covering for a team leader who's on leave or away ----
@@ -1863,6 +1880,28 @@
   function reopenTask(taskId) { const t = taskById(taskId); if (!t) return; t.status = "IN_PROGRESS"; t.completedAt = null; }
   function assignTask(taskId, userId) { const t = taskById(taskId); if (t) t.assignedUserId = userId || null; }
   function assignEquipment(taskId, equipmentId) { const t = taskById(taskId); if (t) t.equipmentId = equipmentId || null; }
+  // Reassigning an existing (non-robotics) task line between a named person, a
+  // Welding Workshop pool, and a vendor — the same three options already offered when
+  // first adding a task line, now available after the fact too. Every real task line
+  // lands unassigned-individual out of triage, so this was the only way a team leader
+  // could actually route one onto their pool once it already existed.
+  function reassignTaskToIndividual(taskId, userId) {
+    const t = taskById(taskId);
+    if (!t) return;
+    t.assignedUserId = userId || null; t.pool = null; t.poolCount = null; t.vendor = null;
+  }
+  function reassignTaskToPool(taskId, pool, poolCount) {
+    const t = taskById(taskId);
+    if (!t || !pool) return;
+    t.pool = pool; t.poolCount = Math.max(1, poolCount || 1); t.vendor = null; t.assignedUserId = effectiveLeaderId("u_dave");
+  }
+  function reassignTaskToVendor(taskId, vendorName) {
+    const t = taskById(taskId);
+    if (!t) return;
+    const job = jobById(t.jobId);
+    t.vendor = vendorName || "Vendor"; t.pool = null; t.poolCount = null;
+    t.assignedUserId = job ? (job.ownerId || job.coordinatorId || null) : null;
+  }
   function changeDueDate(taskId, newDate, reason, note) {
     const t = taskById(taskId);
     if (!t) return;
@@ -1934,9 +1973,15 @@
     };
   }
 
+  // Each row is one direct report, but the counts cover that person's whole subtree
+  // (themself + everyone reporting up through them) — a supervisor scanning their
+  // Team page needs to see that a team leader's own crew is struggling, not just
+  // whatever's directly assigned to the team leader personally, which for someone
+  // who mostly delegates and coordinates can sit at zero while their team drowns.
   function getManagerRollup(managerId) {
     return directReports(managerId).map(person => {
-      const rows = allRows().filter(r => r.assignedUserId === person.id);
+      const subtreeIds = new Set([person.id, ...allReportsRecursive(person.id).map(u => u.id)]);
+      const rows = allRows().filter(r => subtreeIds.has(r.assignedUserId));
       const open = rows.filter(r => !r.done);
       return {
         staff: person,
@@ -2201,6 +2246,38 @@
     </section>`;
   }
 
+  /* ---- Team Needs Attention (skip-level visibility, shown on My Dashboard) ---- */
+  // Anyone who manages people — at any level — sees it the moment something's overdue
+  // or at risk anywhere under them, not just among their direct reports' own tasks.
+  // getManagerRollup already rolls each direct report's whole subtree up into their
+  // row, so this is just "which of my direct reports' rows aren't clean."
+  function renderTeamAttentionPanel(userId) {
+    if (!isManager(userId)) return "";
+    const rollup = getManagerRollup(userId)
+      .filter(r => r.overdueCount > 0 || r.dueSoonCount > 0)
+      .sort((a, b) => (b.overdueCount - a.overdueCount) || (b.dueSoonCount - a.dueSoonCount));
+    if (!rollup.length) return "";
+    const totalOverdue = rollup.reduce((s, r) => s + r.overdueCount, 0);
+    const totalDueSoon = rollup.reduce((s, r) => s + r.dueSoonCount, 0);
+    return `
+    <section class="block owner-block">
+      <div class="block-head"><h2>Team Needs Attention</h2><span class="block-count">${[totalOverdue ? `${totalOverdue} overdue` : "", totalDueSoon ? `${totalDueSoon} due soon` : ""].filter(Boolean).join(" · ")}</span></div>
+      <div class="panel" style="padding:0;">
+        ${rollup.map(r => `
+          <button class="card handover-row" data-open-team-member="${r.staff.id}">
+            <div>
+              <div class="job-title">${r.staff.name}</div>
+              <div class="job-meta">${r.staff.jobTitle}${isManager(r.staff.id) ? " · counts include their own team" : ""}</div>
+            </div>
+            <div class="handover-right">
+              ${r.overdueCount ? `<span class="badge bad" style="margin-right:4px;">${r.overdueCount} overdue</span>` : ""}
+              ${r.dueSoonCount ? `<span class="badge warn">${r.dueSoonCount} due soon</span>` : ""}
+            </div>
+          </button>`).join("")}
+      </div>
+    </section>`;
+  }
+
   /* ---- Jobs You Own (job-owner oversight, shown on My Dashboard) ---- */
   function renderOwnedJobsPanel(userId) {
     const o = ownerOverview(userId);
@@ -2293,6 +2370,7 @@
       ${renderCoveringBanner(me.id)}
       ${renderTriageBanner(me.id)}
       ${renderPendingApprovalsPanel(me.id)}
+      ${renderTeamAttentionPanel(me.id)}
       ${renderOwnedJobsPanel(me.id)}
 
       ${CATEGORIES.map(cat => {
@@ -2479,9 +2557,9 @@
         </div>
         ${newActionButton()}
       </div>
-      ${renderDelegationPanel()}
       ${sections.map(s => renderTeamSection(s.id, s.covering)).join("")}
       ${sections.length === 0 ? `<div class="empty-note">No team of your own right now, and nobody's delegated coverage to you.</div>` : ""}
+      ${renderDelegationPanel()}
     `;
   }
   function renderTeamSection(leaderId, covering) {
@@ -2520,28 +2598,27 @@
     `;
   }
   function renderDelegationPanel() {
-    const all = [...state.delegations].sort((a, b) => b.startDate - a.startDate);
+    const all = state.delegations.filter(d => isDelegationActive(d)).sort((a, b) => b.startDate - a.startDate);
     return `
     <div class="panel" style="margin-bottom:18px;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:${all.length ? "14px" : "0"};">
         <div>
           <h2 style="margin:0;">Delegated coverage</h2>
-          <p style="color:var(--ink-faint); font-size:12.5px; margin:4px 0 0;">When a team leader is on leave or away, hand their coverage to someone else — themselves later, another team leader, or an employee stepping up. Their open tasks, actions and owned jobs immediately move onto the covering person's dashboard (tagged so it's clear where they came from) and move back off it the moment the delegation ends — nothing to reassign by hand either way. The original leader keeps their own access throughout.</p>
+          <p style="color:var(--ink-faint); font-size:12.5px; margin:4px 0 0;">When a team leader is on leave or away, hand their coverage to someone else — themselves later, another team leader, or an employee stepping up. Their open tasks, actions and owned jobs immediately move onto the covering person's dashboard (tagged so it's clear where they came from) and move back off it the moment the delegation ends — nothing to reassign by hand either way. The original leader keeps their own access throughout. Delegations that have ended drop off this list automatically.</p>
         </div>
         <button class="btn-secondary" data-open-delegation="1" style="flex:none;">+ New delegation</button>
       </div>
       ${all.length ? `<div class="table-wrap" style="margin-top:14px;"><table>
         <thead><tr><th>Covering for</th><th>Covered by</th><th>Since</th><th>Until</th><th>Note</th><th></th></tr></thead>
         <tbody>${all.map(d => {
-          const active = isDelegationActive(d);
           const from = userById(d.fromUserId), to = userById(d.toUserId);
           return `<tr>
             <td>${from ? from.name : "—"}</td>
             <td>${to ? to.name : "—"}</td>
             <td class="mono">${fmtShort(d.startDate)}</td>
-            <td>${d.endDate ? fmtShort(d.endDate) : (active ? `<span class="badge warn">Until ended</span>` : "—")}</td>
+            <td>${d.endDate ? fmtShort(d.endDate) : `<span class="badge warn">Until ended</span>`}</td>
             <td>${d.note ? `<span class="desc-notes">${d.note}</span>` : ""}</td>
-            <td>${active ? `<button class="btn-ghost-small" data-end-delegation="${d.id}">End now</button>` : `<span class="badge neutral">Ended</span>`}</td>
+            <td><button class="btn-ghost-small" data-end-delegation="${d.id}">End now</button></td>
           </tr>`;
         }).join("")}</tbody>
       </table></div>` : ""}
@@ -2964,7 +3041,7 @@
       <div class="panel">
         <h2>2. Triage what came in</h2>
         <p style="color:var(--ink-soft); margin:0;">BC's task lines are generic — the same standard list shows up whether or not it actually applies to a given job. So a freshly-imported job doesn't land straight on the board: it sits in a <b>Needs triage</b> panel above it until the coordinator or production owner opens it and cleans up the candidate list. Remove what doesn't apply with ✕ (gone entirely, not just unticked — a removed one is remembered, so it won't come back if the file is imported again), hover the gap between candidates for a "+" to add one BC didn't send, and drag a candidate's ⠿ handle to reorder — the order here is the order the real task lines land in once confirmed. Whatever's left when you hit Confirm becomes the job's task lines. This is a one-time pass per job, not per re-import.</p>
-        <p style="color:var(--ink-soft); margin:10px 0 0;">If a job type has a known-good set of task lines, apply a <b>template</b> instead of picking through BC's list by hand — it completely replaces whatever's currently queued. Templates are company-wide, live under Job Board → Task Line Templates in the sidebar, and are editable by an Admin.</p>
+        <p style="color:var(--ink-soft); margin:10px 0 0;">If a job type has a known-good set of task lines, apply a <b>template</b> instead of picking through BC's list by hand — it completely replaces whatever's currently queued. Templates are company-wide, live under Job Board → Task Line Templates in the sidebar, and are editable by an Admin — including editing a line's wording directly, not just deleting and re-adding it.</p>
       </div>
 
       <div class="panel">
@@ -2982,9 +3059,9 @@
           <li style="margin-bottom:8px;"><b>Coordinator</b> (owns a job start to finish) — Job Board to move it through the early stages, triage freshly-imported task lines, and manage holds; All Actions if you're also tracking non-production items.</li>
           <li style="margin-bottom:8px;"><b>Production team leader</b> (e.g. Welding Workshop, Robotics) — My Dashboard for your own items, Team for your crew's workload, and the job itself (open it from the Job Board or WIP Meeting) to add and assign task lines once it reaches Production.</li>
           <li style="margin-bottom:8px;"><b>Anyone doing task work</b> — My Dashboard is the whole job: your open items, drag the slider, done.</li>
-          <li style="margin-bottom:8px;"><b>Manager</b> — WIP Meeting for the daily "what's the state of the floor" view, Analytics for trends (forecast, why dates keep moving, idle time), Team for workload across your reports.</li>
+          <li style="margin-bottom:8px;"><b>Manager</b> — WIP Meeting for the daily "what's the state of the floor" view, Analytics for trends (forecast, why dates keep moving, idle time), Team for workload across your reports. If anyone below you — including a team leader's own team, not just your direct reports — has something overdue or at risk, it rolls up and shows against that direct report's row on Team, and a "Team Needs Attention" panel surfaces the same thing on My Dashboard so a skip-level manager doesn't have to go looking for it.</li>
           <li style="margin-bottom:8px;"><b>Everyone</b> — All Actions is the one list of literally everything, production and non-production alike, filterable and sortable.</li>
-          <li style="margin-bottom:8px;"><b>Team leader going on leave?</b> A manager can hand their coverage to someone else — themselves, another team leader, or an employee stepping up — from the "Delegated coverage" panel on Team. Their open tasks, actions and owned jobs show up on the covering person's dashboard immediately (tagged "Covering for…") and disappear from it the moment the delegation ends — nothing to reassign by hand. The original leader keeps their own access throughout.</li>
+          <li style="margin-bottom:8px;"><b>Team leader going on leave?</b> A manager can hand their coverage to someone else — themselves, another team leader, or an employee stepping up — from the "Delegated coverage" panel on Team, below the actual team listing. Their open tasks, actions and owned jobs show up on the covering person's dashboard immediately (tagged "Covering for…") and disappear from it the moment the delegation ends — nothing to reassign by hand, and the delegation itself drops off this list the moment it ends too, so it never fills up with stale history. The original leader keeps their own access throughout.</li>
           <li><b>Admin</b> is a permission, not a role — it's a checkbox on a person (Employees), not something anyone's whole job is. Whoever holds it can add/edit employees, reassign managers, set a defined role, and grant Admin to others. Priya holds it by default in the sample data.</li>
         </ul>
       </div>
@@ -2993,7 +3070,7 @@
         <h2>Views at a glance</h2>
         <ul style="margin:0; padding-left:18px; color:var(--ink-soft);">
           <li style="margin-bottom:6px;"><b>My Dashboard</b> — your open work, and jobs about to hand over to you next.</li>
-          <li style="margin-bottom:6px;"><b>Job Board</b> — every job, every stage, drag-and-drop. The "where does everything stand" view. Open a job and expand "Job lifetime" for the path it's taken — time in each stage, plus any time logged on hold. Hover the gap above or below any task line for a "+" to insert one exactly there, or drag a line's ⠿ handle to reorder it — works at any stage, including right after triage, before the job's even reached Production. Has its own submenu — click the ▸ next to it for <b>Task Line Templates</b>.</li>
+          <li style="margin-bottom:6px;"><b>Job Board</b> — every job, every stage, drag-and-drop. The "where does everything stand" view. Open a job and expand "Job lifetime" for the path it's taken — time in each stage, plus any time logged on hold. Hover the gap above or below any task line for a "+" to insert one exactly there, or drag a line's ⠿ handle to reorder it — works at any stage, including right after triage, before the job's even reached Production. A task line's "Reassign" section works on anything already created, not just at the moment you add it — switch it between a named person, the Welding Workshop pool (with a headcount), or a vendor/3rd party at any time. Has its own submenu — click the ▸ next to it for <b>Task Line Templates</b>.</li>
           <li style="margin-bottom:6px;"><b>Team</b> — visible if you manage people or lead a workshop pool.</li>
           <li style="margin-bottom:6px;"><b>WIP Meeting</b> — jobs actually in Production right now, current task and risk per job.</li>
           <li style="margin-bottom:6px;"><b>All Actions</b> — everything, one filterable table.</li>
@@ -3337,7 +3414,7 @@
           <button class="due-link" data-edit-task="${task.id}">Expected: <b>${task.expectedCompletionDate ? fmtShort(task.expectedCompletionDate) : "Set date"}</b></button>
         </div>
         ${editing ? renderEditPanel(task, changes) : ""}
-        ${task.pool || selfServiceRobotics ? "" : task.process ? `
+        ${selfServiceRobotics ? "" : task.process ? `
         <div class="tl-reassign">Operator:
           <select data-reassign="${task.id}">
             <option value="">Unassigned</option>
@@ -3348,13 +3425,33 @@
             <option value="">Unassigned</option>
             ${equipmentWithCapability(task.process).map(e => `<option value="${e.id}" ${e.id === task.equipmentId ? "selected" : ""}>${e.name}${e.status !== "Available" ? " (" + e.status + ")" : ""}</option>`).join("")}
           </select>
-        </div>` : `
-        <div class="tl-reassign">Reassign:
+        </div>` : renderTaskReassignBlock(task)}
+      </div>`;
+  }
+  // Same three-way choice as adding a task line (person / Welding Workshop pool /
+  // vendor), now on an existing one too — every real task line lands unassigned-
+  // individual out of triage, so this used to be the only kind you could ever pick
+  // after the fact.
+  function renderTaskReassignBlock(task) {
+    const kind = task.pool ? "pool" : task.vendor ? "vendor" : "individual";
+    const pools = WORKSHOP_POOLS.u_dave.roles.map(r => r.role);
+    return `
+      <div class="tl-reassign">
+        <select data-reassign-kind="${task.id}">
+          <option value="individual" ${kind === "individual" ? "selected" : ""}>Assign to a person</option>
+          <option value="pool" ${kind === "pool" ? "selected" : ""}>Welding Workshop pool</option>
+          <option value="vendor" ${kind === "vendor" ? "selected" : ""}>Vendor / 3rd party</option>
+        </select>
+        ${kind === "individual" ? `
           <select data-reassign="${task.id}">
             <option value="">Unassigned</option>
             ${state.users.map(u => `<option value="${u.id}" ${u.id === task.assignedUserId ? "selected" : ""}>${u.name}</option>`).join("")}
+          </select>` : kind === "pool" ? `
+          <select data-reassign-pool="${task.id}">
+            ${pools.map(p => `<option value="${escapeAttr(p)}" ${task.pool === p ? "selected" : ""}>${p}</option>`).join("")}
           </select>
-        </div>`}
+          <input type="number" min="1" data-reassign-pool-count="${task.id}" value="${task.poolCount || 1}" style="width:60px;" title="Headcount">` : `
+          <input type="text" data-reassign-vendor="${task.id}" value="${escapeAttr(task.vendor || "")}" placeholder="Vendor name" style="min-width:160px;">`}
       </div>`;
   }
 
@@ -3745,9 +3842,11 @@
             </div>
             <div style="display:flex; flex-direction:column; gap:4px;">
               ${tpl.tasks.map(t => `
-                <div class="card" ${admin ? `draggable="true" data-template-task-drag="${t.id}" data-template-id="${tpl.id}"` : ""} style="display:flex; align-items:center; gap:8px; padding:7px 10px; ${admin ? "cursor:grab;" : ""}">
+                <div class="card" ${admin ? `data-template-task-drag="${t.id}" data-template-id="${tpl.id}"` : ""} style="display:flex; align-items:center; gap:8px; padding:7px 10px;">
                   ${admin ? `<span class="tl-drag-handle" title="Drag to reorder">⠿</span>` : ""}
-                  <span style="flex:1; font-size:13px;">${escapeAttr(t.name)}</span>
+                  ${admin
+                    ? `<input type="text" data-template-task-name="${t.id}" data-template-id="${tpl.id}" value="${escapeAttr(t.name)}" style="flex:1; padding:5px 7px; border:1px solid var(--line); border-radius:5px; font-size:13px;">`
+                    : `<span style="flex:1; font-size:13px;">${escapeAttr(t.name)}</span>`}
                   ${admin ? `<button class="icon-btn" data-remove-template-task="${t.id}" data-template-id="${tpl.id}" title="Remove">✕</button>` : ""}
                 </div>`).join("")}
               ${tpl.tasks.length === 0 ? `<div class="empty-note">No task lines in this template yet.</div>` : ""}
@@ -3879,6 +3978,11 @@
   // again, own dataTransfer type.
   function wireTemplateDragDrop() {
     document.querySelectorAll("[data-template-task-drag]").forEach(row => {
+      // Draggable only while a drag is actually being picked up from the ⠿ handle —
+      // static draggable="true" on the whole row would fight with selecting text in
+      // the name input now sitting next to it (a click-drag to select text reads as
+      // "start dragging the row" to the browser otherwise).
+      row.addEventListener("mousedown", e => { row.draggable = !!e.target.closest(".tl-drag-handle"); });
       row.addEventListener("dragstart", e => {
         row.classList.add("dragging");
         e.dataTransfer.effectAllowed = "move";
@@ -4017,6 +4121,8 @@
 
     const toggleStaff = e.target.closest("[data-toggle-staff]");
     if (toggleStaff) { const id = toggleStaff.dataset.toggleStaff; state.expandedStaffId = state.expandedStaffId === id ? null : id; render(); return; }
+    const openTeamMember = e.target.closest("[data-open-team-member]");
+    if (openTeamMember) { state.view = "manager"; state.expandedStaffId = openTeamMember.dataset.openTeamMember; render(); return; }
 
     const wipFilter = e.target.closest("[data-wip-filter]");
     if (wipFilter) { state.wipFilter = wipFilter.dataset.wipFilter; render(); return; }
@@ -4359,6 +4465,26 @@
     if (e.target.id === "dg_fromUserId") { state.delegationDraft.fromUserId = e.target.value; render(); return; }
     if (e.target.matches("select[data-reassign]")) { assignTask(e.target.dataset.reassign, e.target.value || null); render(); return; }
     if (e.target.matches("select[data-equipment]")) { assignEquipment(e.target.dataset.equipment, e.target.value || null); render(); return; }
+    if (e.target.matches("select[data-reassign-kind]")) {
+      const taskId = e.target.dataset.reassignKind;
+      const kind = e.target.value;
+      if (kind === "individual") reassignTaskToIndividual(taskId, null);
+      else if (kind === "pool") { const pools = WORKSHOP_POOLS.u_dave.roles.map(r => r.role); reassignTaskToPool(taskId, pools[0], 1); }
+      else reassignTaskToVendor(taskId, "");
+      render(); return;
+    }
+    if (e.target.matches("select[data-reassign-pool]")) {
+      const taskId = e.target.dataset.reassignPool;
+      const t = taskById(taskId);
+      reassignTaskToPool(taskId, e.target.value, t ? t.poolCount : 1);
+      render(); return;
+    }
+    if (e.target.matches("input[data-reassign-pool-count]")) {
+      const taskId = e.target.dataset.reassignPoolCount;
+      const t = taskById(taskId);
+      reassignTaskToPool(taskId, t ? t.pool : null, Number(e.target.value) || 1);
+      render(); return;
+    }
     if (e.target.matches("select[data-job-owner]")) { setJobOwner(e.target.dataset.jobOwner, e.target.value); render(); return; }
     if (e.target.matches("input[data-edit-date]")) { state.pendingEdit.date = e.target.value; render(); return; }
     if (e.target.matches("select[data-edit-reason]")) { state.pendingEdit.reason = e.target.value; render(); return; }
@@ -4414,6 +4540,21 @@
       // ever reaches state, silently dropping whatever was just typed into it.
       const tpl = state.taskTemplates.find(t => t.id === e.target.dataset.templateName);
       if (tpl) tpl.name = e.target.value;
+      saveState();
+      return;
+    }
+    if (e.target.matches("input[data-reassign-vendor]")) {
+      // Same reasoning as the template-name fix above: no render() on this field's
+      // own change/blur, so it can never clobber another input's uncommitted value.
+      reassignTaskToVendor(e.target.dataset.reassignVendor, e.target.value);
+      saveState();
+      return;
+    }
+    if (e.target.matches("input[data-template-task-name]")) {
+      // Same no-render reasoning again — a template can hold several of these.
+      const tpl = state.taskTemplates.find(t => t.id === e.target.dataset.templateId);
+      const task = tpl && tpl.tasks.find(t => t.id === e.target.dataset.templateTaskName);
+      if (task) task.name = e.target.value;
       saveState();
       return;
     }
